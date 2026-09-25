@@ -7,12 +7,8 @@ plugins {
 
 android {
     namespace = "com.example.bloom_gad_app"
-    compileSdk = flutter.compileSdkVersion
+    compileSdk = 37
     ndkVersion = flutter.ndkVersion
-    
-    defaultConfig {
-        minSdk = 24   // Jitsi requires minimum SDK 24
-    }
 
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
@@ -26,9 +22,8 @@ android {
     defaultConfig {
         // TODO: Specify your own unique Application ID (https://developer.android.com/studio/build/application-id.html).
         applicationId = "com.example.bloom_gad_app"
-        // You can update the following values to match your application needs.
-        // For more information, see: https://flutter.dev/to/review-gradle-config.
-        minSdk = flutter.minSdkVersion
+        // Jitsi requires minimum SDK 24
+        minSdk = 24
         targetSdk = flutter.targetSdkVersion
         versionCode = flutter.versionCode
         versionName = flutter.versionName
