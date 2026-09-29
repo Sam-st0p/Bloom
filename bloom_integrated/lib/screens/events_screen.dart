@@ -9,64 +9,121 @@ import '../theme/app_theme.dart';
 import '../services/database_service.dart';
 
 final _db = Supabase.instance.client;
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  JITSI CONFIG — must match the React admin (SeminarsPage.jsx) exactly
+// ─────────────────────────────────────────────────────────────────────────────
+const String _jitsiDomain = 'meet.bloomgad.xyz';
+
+/// Same logic as the web admin:
+///   `bloomgad${seminar.id.replace(/[^a-zA-Z0-9]/g, '').toLowerCase()}`
+String _jitsiRoomName(String seminarId) =>
+    'bloomgad${seminarId.replaceAll(RegExp(r'[^a-zA-Z0-9]'), '').toLowerCase()}';
+
 // ─────────────────────────────────────────────────────────────────────────────
 //  MEETING TRACKER — global singleton for attendance duration tracking
 // ─────────────────────────────────────────────────────────────────────────────
 class _MeetingTracker {
+  // How attendance time is stored in seminar_attendance_logs:
+  //   join_time          → the FIRST time the student joined (never overwritten)
+  //   duration_minutes   → total minutes from all FINISHED sessions
+  //   session_started_at → when the CURRENT session began (null when not in the call)
+  //   leave_time         → the last time the student left
+  // Rejoining after a disconnect ADDS to the total instead of resetting it.
   static String?   seminarId;
   static String?   userId;
-  static DateTime? joinTime;
-  static Timer?    _heartbeat;
+  static DateTime? sessionStart;
+  static int       previousMinutes = 0;
 
-  static bool get isActive => seminarId != null && joinTime != null;
+  static bool get isActive => seminarId != null && sessionStart != null;
 
-  static void start(String sid, String uid, DateTime joinDt) {
-    seminarId = sid;
-    userId    = uid;
-    joinTime  = joinDt;
-    _heartbeat?.cancel();
-    _heartbeat = Timer.periodic(const Duration(seconds: 30), (_) async {
-      if (seminarId == null || userId == null || joinTime == null) return;
-      final now     = DateTime.now().toUtc();
-      final durMins = now.difference(joinTime!).inMinutes;
-      try {
-        await Supabase.instance.client.from('seminar_attendance_logs').upsert({
-          'seminar_id':        seminarId,
-          'user_id':           userId,
-          'join_time':         joinTime!.toIso8601String(),
-          'leave_time':        now.toIso8601String(),
-          'duration_minutes':  durMins,
-          'attendance_status': 'joined',
-          'is_eligible':       false,
-        }, onConflict: 'seminar_id,user_id');
-      } catch (e) { debugPrint('Heartbeat error: $e'); }
-    });
+  static int _minutesBetween(DateTime from, DateTime to) {
+    final secs = to.difference(from).inSeconds;
+    return secs <= 0 ? 0 : (secs / 60).round();
   }
 
-  static Future<int> stop() async {
-    _heartbeat?.cancel();
-    _heartbeat = null;
-    if (seminarId == null || userId == null || joinTime == null) return 0;
-    final leaveTime = DateTime.now().toUtc();
-    final durMins   = leaveTime.difference(joinTime!).inMinutes;
-    final sid = seminarId!;
-    final uid = userId!;
-    final jt  = joinTime!.toIso8601String();
-    seminarId = null;
-    userId    = null;
-    joinTime  = null;
+  /// Opens a new session. Returns an error message, or null on success.
+  static Future<String?> begin(String sid, String uid) async {
+    final db  = Supabase.instance.client;
+    final now = DateTime.now().toUtc();
     try {
-      await Supabase.instance.client.from('seminar_attendance_logs').upsert({
-        'seminar_id':        sid,
-        'user_id':           uid,
-        'join_time':         jt,
-        'leave_time':        leaveTime.toIso8601String(),
-        'duration_minutes':  durMins,
-        'attendance_status': durMins >= 1 ? 'present' : 'partial',
-        'is_eligible':       false,
-      }, onConflict: 'seminar_id,user_id');
-    } catch (e) { debugPrint('Stop attendance error: $e'); }
-    return durMins;
+      final existing = await db.from('seminar_attendance_logs')
+          .select('join_time, duration_minutes, session_started_at')
+          .eq('seminar_id', sid).eq('user_id', uid)
+          .maybeSingle();
+
+      int prev = 0;
+      if (existing == null) {
+        await db.from('seminar_attendance_logs').insert({
+          'seminar_id':         sid,
+          'user_id':            uid,
+          'join_time':          now.toIso8601String(),
+          'leave_time':         null,
+          'duration_minutes':   0,
+          'session_started_at': now.toIso8601String(),
+          'attendance_status':  'joined',
+          'is_eligible':        false,
+        });
+      } else {
+        prev = (existing['duration_minutes'] as num?)?.toInt() ?? 0;
+        // A previous session that was never closed (e.g. the app was closed
+        // while in the call): count it up to now so that time isn't lost.
+        final openRaw = existing['session_started_at'] as String?;
+        if (openRaw != null) {
+          final openStart = DateTime.tryParse(openRaw)?.toUtc();
+          if (openStart != null) prev += _minutesBetween(openStart, now);
+        }
+        await db.from('seminar_attendance_logs').update({
+          'leave_time':         null,
+          'duration_minutes':   prev,
+          'session_started_at': now.toIso8601String(),
+          // join_time, attendance_status and is_eligible are left untouched
+        }).eq('seminar_id', sid).eq('user_id', uid);
+      }
+
+      seminarId       = sid;
+      userId          = uid;
+      sessionStart    = now;
+      previousMinutes = prev;
+      return null;
+    } catch (e) {
+      debugPrint('Attendance begin error: $e');
+      return e.toString();
+    }
+  }
+
+  /// Closes the current session and returns the student's TOTAL minutes.
+  static Future<int> stop() async {
+    if (seminarId == null || userId == null || sessionStart == null) return 0;
+    final db   = Supabase.instance.client;
+    final now  = DateTime.now().toUtc();
+    final sid  = seminarId!;
+    final uid  = userId!;
+    final total = previousMinutes + _minutesBetween(sessionStart!, now);
+    seminarId = null; userId = null; sessionStart = null; previousMinutes = 0;
+
+    try {
+      // Only close the session if it is still open. If the admin already ended
+      // the meeting, they closed it with the correct end time — don't overwrite.
+      final updated = await db.from('seminar_attendance_logs').update({
+        'leave_time':         now.toIso8601String(),
+        'duration_minutes':   total,
+        'session_started_at': null,
+      }).eq('seminar_id', sid).eq('user_id', uid)
+        .not('session_started_at', 'is', null)
+        .select('duration_minutes');
+
+      if ((updated as List).isNotEmpty) return total;
+
+      // Already closed by the admin → report what was saved
+      final row = await db.from('seminar_attendance_logs')
+          .select('duration_minutes')
+          .eq('seminar_id', sid).eq('user_id', uid).maybeSingle();
+      return (row?['duration_minutes'] as num?)?.toInt() ?? total;
+    } catch (e) {
+      debugPrint('Stop attendance error: $e');
+      return total;
+    }
   }
 }
 
@@ -117,6 +174,9 @@ int _extractRegCount(Map<String, dynamic> sem) {
 String _effectiveStatus(Map<String, dynamic> sem) {
   final dbStatus = sem['status'] as String? ?? 'upcoming';
   if (dbStatus == 'cancelled' || dbStatus == 'completed') return dbStatus;
+  // If the admin has started the meeting, it stays live until they end it,
+  // even if the scheduled end time has passed.
+  if (dbStatus == 'ongoing') return 'ongoing';
   final end   = sem['scheduled_end']   as String?;
   final start = sem['scheduled_start'] as String?;
   if (end != null) {
@@ -148,6 +208,8 @@ bool _registrationOpen(Map<String, dynamic> sem) {
 bool _seminarHasEnded(Map<String, dynamic> sem) {
   final dbStatus = sem['status'] as String? ?? 'upcoming';
   if (dbStatus == 'cancelled' || dbStatus == 'completed') return true;
+  // A meeting the admin has started is never "ended" until they close it.
+  if (dbStatus == 'ongoing') return false;
   final raw = (sem['scheduled_end'] ?? sem['scheduled_start']) as String?;
   if (raw == null) return false;
   try {
@@ -202,7 +264,7 @@ Map<String, dynamic> _seminarToCalendarEvent(Map<String, dynamic> sem) {
 // ─────────────────────────────────────────────────────────────────────────────
 //  JOIN JITSI MEETING — opens in browser (works on all devices immediately)
 // ─────────────────────────────────────────────────────────────────────────────
-Future _joinJitsiMeeting(
+Future<void> _joinJitsiMeeting(
   BuildContext context,
   Map<String, dynamic> seminar, {
   required bool isRegistered,
@@ -216,6 +278,19 @@ Future _joinJitsiMeeting(
         duration: const Duration(seconds: 4)));
     }
     return;
+  }
+
+  // Refresh from the database so we never act on a stale list
+  // (e.g. the admin just clicked "Start Meeting" and realtime hasn't arrived).
+  try {
+    final fresh = await Supabase.instance.client
+        .from('seminars')
+        .select('status, scheduled_start, scheduled_end')
+        .eq('id', seminar['id'])
+        .maybeSingle();
+    if (fresh != null) seminar = {...seminar, ...fresh};
+  } catch (e) {
+    debugPrint('Could not refresh seminar status: $e');
   }
 
   if (_seminarHasEnded(seminar)) {
@@ -253,10 +328,9 @@ Future _joinJitsiMeeting(
     return;
   }
 
-  // 1. Sanitize Seminar ID strictly (matches React Web Admin cleanId logic)
-  final rawId = (seminar['id'] ?? seminar['seminar_id'])?.toString() ?? '';
-  final cleanId = rawId.replaceAll(RegExp(r'[^a-zA-Z0-9]'), '').toLowerCase();
-  final roomName = 'bloomgad$cleanId';
+  // 1. Build the room name exactly like the React web admin
+  final rawId    = (seminar['id'] ?? seminar['seminar_id'])?.toString() ?? '';
+  final roomName = _jitsiRoomName(rawId);
 
   final user    = Supabase.instance.client.auth.currentUser;
   final profile = await Supabase.instance.client
@@ -266,52 +340,49 @@ Future _joinJitsiMeeting(
       .maybeSingle();
 
   final rawName = (profile?['full_name'] as String?)?.trim().isNotEmpty == true
-      ? profile!['full_name'] as String
+      ? (profile!['full_name'] as String).trim()
       : user?.email ?? 'Student';
-      
-  // Encode display name cleanly without extra wrapped quotes
-  final encodedName = Uri.encodeComponent(rawName);
 
-  // 2. Build Jitsi URL passing room parameters cleanly
+  // Jitsi parses hash params as JSON, so the string value must be wrapped in
+  // quotes (%22). Strip any double quotes in the name so the JSON stays valid.
+  final encodedName = Uri.encodeComponent(rawName.replaceAll('"', ''));
+
+  // 2. Build the Jitsi URL — note the $ interpolation on roomName/encodedName
   final jitsiUrl = Uri.parse(
-    'https://meet.bloomgad.xyz/$roomName#userInfo.displayName=$encodedName&config.disableDeepLinking=true',
+    'https://$_jitsiDomain/$roomName'
+    '#userInfo.displayName=%22$encodedName%22'
+    '&config.disableDeepLinking=true',
   );
+  debugPrint('[Jitsi] Joining room: $jitsiUrl');
 
   try {
-    // 3. Log attendance using original rawId (UUID format for Supabase)
-    final joinTimeDt = DateTime.now().toUtc();
-    await Supabase.instance.client.from('seminar_attendance_logs').upsert({
-      'seminar_id':        rawId,
-      'user_id':           user?.id,
-      'join_time':         joinTimeDt.toIso8601String(),
-      'leave_time':        null,
-      'duration_minutes':  null,
-      'attendance_status': 'joined',
-      'is_eligible':       false,
-    }, onConflict: 'seminar_id,user_id');
+    // 3. Start (or resume) this student's attendance session.
+    //    Rejoining after a disconnect keeps the minutes already attended.
+    if (user == null) throw Exception('Please sign in again.');
+    if (_MeetingTracker.isActive) await _MeetingTracker.stop();
+    final beginErr = await _MeetingTracker.begin(rawId, user.id);
+    if (beginErr != null) throw Exception('Could not record attendance: $beginErr');
 
-    _MeetingTracker.start(rawId, user?.id ?? '', joinTimeDt);
-
-    // 4. Launch URL using inAppWebView / external application mode
+    // 4. Open the meeting in the external browser
     final launched = await launchUrl(
-      jitsiUrl, 
+      jitsiUrl,
       mode: LaunchMode.externalApplication,
     );
 
-    if (!launched && context.mounted) {
-      _MeetingTracker.stop();
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-        content: Text('Could not open the meeting. Please try again.',
-            style: GoogleFonts.nunito()),
-        backgroundColor: AppColors.danger));
+    if (!launched) {
+      await _MeetingTracker.stop();
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text('Could not open the meeting. Please try again.',
+              style: GoogleFonts.nunito()),
+          backgroundColor: AppColors.danger));
+      }
       return;
     }
-
-    Future.delayed(const Duration(minutes: 30), () {
-      if (_MeetingTracker.isActive) _MeetingTracker.stop();
-    });
+    // No auto-stop timer here: attendance ends when the user returns to the
+    // app (see didChangeAppLifecycleState) or when the admin ends the meeting.
   } catch (e) {
-    _MeetingTracker.stop();
+    await _MeetingTracker.stop();
     if (context.mounted) {
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(
         content: Text('Could not open meeting: ${e.toString()}',
@@ -438,7 +509,10 @@ class _SeminarsTabState extends State<_SeminarsTab> with WidgetsBindingObserver 
   final Set<String> _registering  = {};
   final Set<String> _evaluatedIds = {}; // seminar IDs already evaluated by user
 
-  // Meeting tracking handled by _MeetingTracker singleton
+  // True once the app has actually gone to the background after joining,
+  // so we only stop attendance when the user comes BACK from the meeting.
+  bool _leftForMeeting = false;
+
   static const int  _pageSize    = 10;
   static const List<String> _filters = ['All', 'Live', 'Upcoming', 'Registered', 'Past'];
   final _scrollController = ScrollController();
@@ -470,25 +544,29 @@ class _SeminarsTabState extends State<_SeminarsTab> with WidgetsBindingObserver 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     super.didChangeAppLifecycleState(state);
-    // Trigger on resumed AND inactive — Android returns either state
-    // when user closes Chrome and returns to the app
-    if ((state == AppLifecycleState.resumed ||
-         state == AppLifecycleState.inactive) &&
-        _MeetingTracker.isActive) {
-      Future.delayed(const Duration(milliseconds: 500), () {
-        if (!_MeetingTracker.isActive) return;
-        _MeetingTracker.stop().then((durationMins) {
-          if (mounted) {
-            ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-              content: Text(
-                durationMins >= 1
-                    ? 'Attendance recorded: $durationMins minute${durationMins == 1 ? '' : 's'}.'
-                    : 'Attendance recorded.',
-                style: GoogleFonts.nunito()),
-              backgroundColor: AppColors.primary,
-              duration: const Duration(seconds: 4)));
-          }
-        });
+    if (!_MeetingTracker.isActive) return;
+
+    // Opening the browser sends the app to the background.
+    if (state == AppLifecycleState.paused || state == AppLifecycleState.hidden) {
+      _leftForMeeting = true;
+      return;
+    }
+
+    // Only finalize attendance when the user actually comes back to the app.
+    if (state == AppLifecycleState.resumed && _leftForMeeting) {
+      _leftForMeeting = false;
+      _MeetingTracker.stop().then((durationMins) {
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text(
+            durationMins >= 1
+                ? 'Attendance saved. Total time in this seminar: $durationMins minute${durationMins == 1 ? '' : 's'}.'
+                : 'Attendance recorded.',
+            style: GoogleFonts.nunito()),
+          backgroundColor: AppColors.primary,
+          duration: const Duration(seconds: 4)));
+        // Pick up the latest status (e.g. the admin ended the meeting → Evaluate)
+        _load();
       });
     }
   }
@@ -518,7 +596,8 @@ class _SeminarsTabState extends State<_SeminarsTab> with WidgetsBindingObserver 
             table: 'seminar_registrations', callback: (_) => _refreshCounts())
         .onPostgresChanges(event: PostgresChangeEvent.delete, schema: 'public',
             table: 'seminar_registrations', callback: (_) => _refreshCounts())
-        .subscribe();
+        .subscribe((status, [error]) =>
+            debugPrint('Realtime: $status ${error ?? ''}'));
   }
 
   Future<void> _refreshCounts() async {
@@ -555,8 +634,10 @@ class _SeminarsTabState extends State<_SeminarsTab> with WidgetsBindingObserver 
   Future<void> _load() async {
     // Fallback: finalize any active meeting tracker when load is called
     if (_MeetingTracker.isActive) {
-      _MeetingTracker.stop();
+      _leftForMeeting = false;
+      await _MeetingTracker.stop();
     }
+    if (!mounted) return;
     setState(() { _loading = true; _page = 0; _hasMore = true; });
     try {
       final sems = await _db.from('seminars').select('*').eq('is_public', true)
@@ -641,7 +722,6 @@ class _SeminarsTabState extends State<_SeminarsTab> with WidgetsBindingObserver 
     if (!mounted) return;
     final freshSem = _seminars.firstWhere((s) => s['id'] == semId, orElse: () => sem);
     final isReg    = widget.regState.isRegistered(semId);
-    final isOpen   = _registrationOpen(freshSem);
     if (!isReg) {
       final regCount = _extractRegCount(freshSem);
       final maxP     = freshSem['max_participants'] as int?;
@@ -728,7 +808,7 @@ class _SeminarsTabState extends State<_SeminarsTab> with WidgetsBindingObserver 
       child: ListView.builder(
         controller: _scrollController,
         padding: const EdgeInsets.all(16),
-        itemCount: extraItems + list.length +
+        itemCount: extraItems + (list.isEmpty ? 1 : list.length) +
             (_loadingMore ? 1 : 0) +
             (!_hasMore && _seminars.isNotEmpty && _filter == 'All' ? 1 : 0),
         itemBuilder: (ctx, rawIndex) {
@@ -768,9 +848,12 @@ class _SeminarsTabState extends State<_SeminarsTab> with WidgetsBindingObserver 
 
           // ── Empty state ───────────────────────────────────────────────
           if (list.isEmpty) {
-            return const _EmptyState(
-              icon: Icons.event_busy_rounded, title: 'Nothing here yet',
-              sub: 'Try a different filter or check back later');
+            if (i == 0) {
+              return const _EmptyState(
+                icon: Icons.event_busy_rounded, title: 'Nothing here yet',
+                sub: 'Try a different filter or check back later');
+            }
+            return const SizedBox.shrink();
           }
 
           // ── Loading / end ─────────────────────────────────────────────
@@ -792,7 +875,7 @@ class _SeminarsTabState extends State<_SeminarsTab> with WidgetsBindingObserver 
           final semId    = sem['id'] as String;
           final isReg    = widget.regState.isRegistered(semId);
           final isBusy   = _registering.contains(semId);
-            final regCount = _extractRegCount(sem);
+          final regCount = _extractRegCount(sem);
           final status   = _effectiveStatus(sem);
           final maxP     = sem['max_participants'] as int?;
           final isFull   = maxP != null && regCount >= maxP && !isReg;
@@ -805,13 +888,21 @@ class _SeminarsTabState extends State<_SeminarsTab> with WidgetsBindingObserver 
           final hasEvaluated = _evaluatedIds.contains(sem['id'].toString());
           if (isBusy) {
             btnLabel = isReg ? 'Cancelling…' : 'Registering…';
-          } else if (status == 'completed' && isReg && hasEvaluated) btnLabel = 'Evaluated ✓';
-          else if (status == 'completed')          btnLabel = isReg ? 'Evaluate' : 'Not Registered';
-          else if (status == 'cancelled')          btnLabel = 'Cancelled';
-          else if (isFull)                         btnLabel = 'Fully Booked';
-          else if (!isOpen && !isReg)              btnLabel = 'Closed';
-          else if (isReg)                          btnLabel = 'Registered';
-          else                                     btnLabel = 'Register';
+          } else if (status == 'completed' && isReg && hasEvaluated) {
+            btnLabel = 'Evaluated ✓';
+          } else if (status == 'completed') {
+            btnLabel = isReg ? 'Evaluate' : 'Not Registered';
+          } else if (status == 'cancelled') {
+            btnLabel = 'Cancelled';
+          } else if (isFull) {
+            btnLabel = 'Fully Booked';
+          } else if (!isOpen && !isReg) {
+            btnLabel = 'Closed';
+          } else if (isReg) {
+            btnLabel = 'Registered';
+          } else {
+            btnLabel = 'Register';
+          }
 
           VoidCallback? btnAction;
           if (!isBusy && !isFull && !hasEvaluated) {
@@ -827,8 +918,8 @@ class _SeminarsTabState extends State<_SeminarsTab> with WidgetsBindingObserver 
                       .then((evals) {
                         if (mounted) {
                           setState(() {
-                          _evaluatedIds.addAll((evals as List).map((e) => e['seminar_id'].toString()));
-                        });
+                            _evaluatedIds.addAll((evals as List).map((e) => e['seminar_id'].toString()));
+                          });
                         }
                       });
                 }
@@ -954,7 +1045,7 @@ class _SeminarsTabState extends State<_SeminarsTab> with WidgetsBindingObserver 
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-//  HAPPENING NOW BANNER (new from designer)
+//  HAPPENING NOW BANNER
 // ─────────────────────────────────────────────────────────────────────────────
 class _HappeningNowBanner extends StatelessWidget {
   final Map<String, dynamic> seminar;
@@ -1007,7 +1098,7 @@ class _HappeningNowBanner extends StatelessWidget {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-//  YOUR NEXT SEMINAR HIGHLIGHT (new from designer)
+//  YOUR NEXT SEMINAR HIGHLIGHT
 // ─────────────────────────────────────────────────────────────────────────────
 class _NextSeminarHighlight extends StatelessWidget {
   final Map<String, dynamic> seminar;
@@ -1049,7 +1140,7 @@ class _NextSeminarHighlight extends StatelessWidget {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-//  SEMINAR DETAIL SCREEN (unchanged from working code)
+//  SEMINAR DETAIL SCREEN
 // ─────────────────────────────────────────────────────────────────────────────
 class SeminarDetailScreen extends StatefulWidget {
   final Map<String, dynamic> seminar;
@@ -1060,9 +1151,13 @@ class SeminarDetailScreen extends StatefulWidget {
   State<SeminarDetailScreen> createState() => _SeminarDetailScreenState();
 }
 
-class _SeminarDetailScreenState extends State<SeminarDetailScreen> {
+class _SeminarDetailScreenState extends State<SeminarDetailScreen> with WidgetsBindingObserver {
   bool _registering = false, _hasEvaluated = false, _evalLoading = false;
   bool _evalSubmitted = false, _checkingEval = true, _regStateReady = false;
+  // Only participants who actually joined the live session may evaluate
+  bool _attended = false, _checkingAttendance = true;
+  // Live copy of the seminar so status changes (e.g. admin ended the meeting) show up
+  late Map<String, dynamic> _sem;
   Timer? _statusTimer;
   final TextEditingController _commentCtrl = TextEditingController();
   final Map<String, int> _scores = {
@@ -1086,9 +1181,13 @@ class _SeminarDetailScreenState extends State<SeminarDetailScreen> {
   @override
   void initState() {
     super.initState();
+    _sem = Map<String, dynamic>.from(widget.seminar);
+    WidgetsBinding.instance.addObserver(this);
     _checkEvaluation();
+    _checkAttendance();
+    _refreshSeminar();
     widget.regState.addListener(_onRegStateChanged);
-    _statusTimer = Timer.periodic(const Duration(seconds: 30), (_) { if (mounted) setState(() {}); });
+    _statusTimer = Timer.periodic(const Duration(seconds: 15), (_) => _refreshSeminar());
     if (widget.regState.loaded) _regStateReady = true;
   }
 
@@ -1096,8 +1195,44 @@ class _SeminarDetailScreenState extends State<SeminarDetailScreen> {
   void dispose() {
     _commentCtrl.dispose();
     _statusTimer?.cancel();
+    WidgetsBinding.instance.removeObserver(this);
     widget.regState.removeListener(_onRegStateChanged);
     super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    // Coming back from the meeting: refresh status and attendance right away
+    if (state == AppLifecycleState.resumed) {
+      _refreshSeminar();
+      _checkAttendance();
+    }
+  }
+
+  Future<void> _refreshSeminar() async {
+    try {
+      final fresh = await _db.from('seminars').select('*')
+          .eq('id', widget.seminar['id']).maybeSingle();
+      if (!mounted) return;
+      setState(() { if (fresh != null) _sem = {..._sem, ...fresh}; });
+    } catch (_) {
+      if (mounted) setState(() {}); // still re-evaluate time-based status
+    }
+  }
+
+  Future<void> _checkAttendance() async {
+    final userId = _db.auth.currentUser?.id;
+    if (userId == null) {
+      if (mounted) setState(() { _attended = false; _checkingAttendance = false; });
+      return;
+    }
+    try {
+      final rows = await _db.from('seminar_attendance_logs').select('id')
+          .eq('seminar_id', widget.seminar['id']).eq('user_id', userId).limit(1);
+      if (mounted) setState(() { _attended = (rows as List).isNotEmpty; _checkingAttendance = false; });
+    } catch (_) {
+      if (mounted) setState(() { _attended = false; _checkingAttendance = false; });
+    }
   }
 
   void _onRegStateChanged() { if (mounted) setState(() { _regStateReady = widget.regState.loaded; }); }
@@ -1112,6 +1247,9 @@ class _SeminarDetailScreenState extends State<SeminarDetailScreen> {
     final semId = widget.seminar['id'] as String;
     if (!widget.regState.isRegistered(semId)) {
       _showSnack('Only registered participants can evaluate this seminar.', isError: true); return;
+    }
+    if (!_attended) {
+      _showSnack('Only participants who attended the live session can evaluate this seminar.', isError: true); return;
     }
     if (_scores.values.any((v) => v == 0)) {
       _showSnack('Please rate all criteria before submitting.', isError: true); return;
@@ -1171,18 +1309,18 @@ class _SeminarDetailScreenState extends State<SeminarDetailScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final sem      = widget.seminar;
+    final sem      = _sem;
     final semId    = sem['id'] as String;
     final status   = _effectiveStatus(sem);
     final isReg    = widget.regState.isRegistered(semId);
     final isOpen   = _registrationOpen(sem);
     final type     = sem['seminar_type'] as String? ?? 'webinar';
     final title    = sem['title'] as String? ?? '';
-    final semType  = sem['seminar_type'] as String? ?? 'webinar';
-          final hasLink  = semType != 'in_person' && status == 'ongoing'; // Only show join when meeting is live
+    final hasLink  = type != 'in_person' && status == 'ongoing'; // Only show join when meeting is live
     final hasEnded = _seminarHasEnded(sem);
     final showRegBtn      = status != 'completed' && status != 'cancelled';
-    final showEvalSection = _regStateReady && status == 'completed' && isReg;
+    final showEvalSection = _regStateReady && status == 'completed' && isReg && !_checkingAttendance && _attended;
+    final showNotAttended = _regStateReady && status == 'completed' && isReg && !_checkingAttendance && !_attended;
 
     return Scaffold(
       backgroundColor: const Color(0xFFF6F9F0),
@@ -1236,7 +1374,6 @@ class _SeminarDetailScreenState extends State<SeminarDetailScreen> {
             if (sem['scheduled_end'] != null) _DetailRow(Icons.flag_outlined, 'End', _fmtDate(sem['scheduled_end'] as String?)),
             if (sem['venue'] != null) _DetailRow(Icons.location_on_outlined, 'Venue', sem['venue']),
             if (hasLink) _DetailRow(Icons.videocam_outlined, 'Meeting', 'Jitsi Meet (Online)'),
-
           ]),
           const SizedBox(height: 20),
           if (sem['description'] != null && (sem['description'] as String).isNotEmpty) ...[
@@ -1319,6 +1456,16 @@ class _SeminarDetailScreenState extends State<SeminarDetailScreen> {
                       boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.05), blurRadius: 8)],
                       border: Border.all(color: const Color(0xFFE8F2D8))),
                   child: (_hasEvaluated || _evalSubmitted) ? _buildEvalDone() : _buildEvalForm()),
+            const SizedBox(height: 32),
+          ] else if (showNotAttended) ...[
+            Container(width: double.infinity, padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+                decoration: BoxDecoration(color: Colors.grey[100], borderRadius: BorderRadius.circular(12),
+                    border: Border.all(color: Colors.grey[300]!)),
+                child: Row(children: [
+                  Icon(Icons.lock_outline, size: 18, color: Colors.grey[400]), const SizedBox(width: 10),
+                  Expanded(child: Text('Only participants who attended the live session can evaluate this seminar.',
+                      style: GoogleFonts.nunito(fontSize: 13, color: Colors.grey[500], height: 1.4))),
+                ])),
             const SizedBox(height: 32),
           ] else if (status == 'completed' && _regStateReady && !isReg) ...[
             Container(width: double.infinity, padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
@@ -1418,7 +1565,7 @@ class _SeminarDetailScreenState extends State<SeminarDetailScreen> {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-//  CALENDAR TAB (unchanged from working code)
+//  CALENDAR TAB
 // ─────────────────────────────────────────────────────────────────────────────
 class _CalendarTab extends StatefulWidget {
   final SeminarRegistrationState regState;
@@ -1473,6 +1620,18 @@ class _CalendarTabState extends State<_CalendarTab> {
   Color _itemColor(Map<String, dynamic> item) =>
       item['_source'] == 'seminar' ? const Color(0xFF2563EB) : _parseColor(item['color_hex'] as String?);
 
+  Future<void> _toggleRegistration(Map<String, dynamic> raw) async {
+    final semId = raw['id'] as String;
+    final isReg = widget.regState.isRegistered(semId);
+    if (isReg) {
+      final err = await DatabaseService.cancelRegistration(semId);
+      if (err == null) widget.regState.remove(semId);
+    } else {
+      final err = await DatabaseService.registerForSeminar(semId);
+      if (err == null || err == 'already_registered') widget.regState.add(semId);
+    }
+  }
+
   void _showDaySheet(BuildContext ctx, String dateStr) {
     final dayItems = _itemsForDate(dateStr);
     String prettyDate;
@@ -1517,17 +1676,8 @@ class _CalendarTabState extends State<_CalendarTab> {
                           if (isSeminar) {
                             final raw = e['_raw'] as Map<String, dynamic>;
                             Navigator.push(ctx, MaterialPageRoute(builder: (_) => SeminarDetailScreen(
-                              seminar: raw, regState: widget.regState, onRegister: () async {
-                                final semId = raw['id'] as String;
-                                final isReg = widget.regState.isRegistered(semId);
-                                if (isReg) {
-                                  final err = await DatabaseService.cancelRegistration(semId);
-                                  if (err == null) widget.regState.remove(semId);
-                                } else {
-                                  final err = await DatabaseService.registerForSeminar(semId);
-                                  if (err == null || err == 'already_registered') widget.regState.add(semId);
-                                }
-                              },
+                              seminar: raw, regState: widget.regState,
+                              onRegister: () => _toggleRegistration(raw),
                             ))).then((_) => _load());
                           }
                         },
@@ -1567,10 +1717,10 @@ class _CalendarTabState extends State<_CalendarTab> {
 
     return RefreshIndicator(color: AppColors.primary, onRefresh: _load,
       child: ListView(padding: const EdgeInsets.all(16), children: [
-        Row(children: [
+        const Row(children: [
           _LegendDot(color: AppColors.primary, label: 'Events'),
-          const SizedBox(width: 16),
-          const _LegendDot(color: Color(0xFF2563EB), label: 'Seminars'),
+          SizedBox(width: 16),
+          _LegendDot(color: Color(0xFF2563EB), label: 'Seminars'),
         ]),
         const SizedBox(height: 12),
         Container(decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(16),
@@ -1599,16 +1749,20 @@ class _CalendarTabState extends State<_CalendarTab> {
               itemBuilder: (ctx, i) {
                 if (i < firstDay) return const SizedBox();
                 final day = i - firstDay + 1;
-                final dateStr = '${year.toString().padLeft(4,'0')}-${month.toString().padLeft(2,'0')}-${day.toString().padLeft(2,'0')}';
+                final dateStr = '${year.toString().padLeft(4, '0')}-${month.toString().padLeft(2, '0')}-${day.toString().padLeft(2, '0')}';
                 final isToday    = day == today.day && month == today.month && year == today.year;
                 final isSelected = _selectedDate == dateStr;
                 final dayItems   = _itemsForDate(dateStr);
                 final hasEvents  = dayItems.isNotEmpty;
                 BoxDecoration cellDeco;
-                if (isSelected) { cellDeco = BoxDecoration(color: AppColors.primary, borderRadius: BorderRadius.circular(8)); }
-                else if (isToday) { cellDeco = BoxDecoration(color: AppColors.primary.withValues(alpha: 0.1), borderRadius: BorderRadius.circular(8), border: Border.all(color: AppColors.primary, width: 1.5)); }
-                else { cellDeco = BoxDecoration(color: hasEvents ? AppColors.primary.withValues(alpha: 0.04) : null, borderRadius: BorderRadius.circular(8)); }
-                Color dayNumColor = isSelected ? Colors.white : isToday ? AppColors.primary : AppColors.primaryDark;
+                if (isSelected) {
+                  cellDeco = BoxDecoration(color: AppColors.primary, borderRadius: BorderRadius.circular(8));
+                } else if (isToday) {
+                  cellDeco = BoxDecoration(color: AppColors.primary.withValues(alpha: 0.1), borderRadius: BorderRadius.circular(8), border: Border.all(color: AppColors.primary, width: 1.5));
+                } else {
+                  cellDeco = BoxDecoration(color: hasEvents ? AppColors.primary.withValues(alpha: 0.04) : null, borderRadius: BorderRadius.circular(8));
+                }
+                final Color dayNumColor = isSelected ? Colors.white : isToday ? AppColors.primary : AppColors.primaryDark;
                 return GestureDetector(
                   onTap: () { setState(() => _selectedDate = dateStr); _showDaySheet(context, dateStr); },
                   child: Container(margin: const EdgeInsets.all(1), decoration: cellDeco,
@@ -1644,12 +1798,8 @@ class _CalendarTabState extends State<_CalendarTab> {
                 if (isSeminar) {
                   final raw = e['_raw'] as Map<String, dynamic>;
                   Navigator.push(context, MaterialPageRoute(builder: (_) => SeminarDetailScreen(
-                    seminar: raw, regState: widget.regState, onRegister: () async {
-                      final sid = raw['id'] as String;
-                      final reg = widget.regState.isRegistered(sid);
-                      if (reg) { final err = await DatabaseService.cancelRegistration(sid); if (err == null) widget.regState.remove(sid); }
-                      else { final err = await DatabaseService.registerForSeminar(sid); if (err == null || err == 'already_registered') widget.regState.add(sid); }
-                    },
+                    seminar: raw, regState: widget.regState,
+                    onRegister: () => _toggleRegistration(raw),
                   ))).then((_) => _load());
                 }
               },
