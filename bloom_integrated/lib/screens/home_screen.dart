@@ -23,15 +23,11 @@ class HomeScreen extends StatefulWidget {
   final void Function(LiveSeminar seminar)? onJoinLive;
 
   /// Opens the Calendar sub-tab of Events directly.
-  /// Used by the "Forum" quick-action tile, which is repurposed to jump
-  /// straight to the calendar view until a real Forum tab exists.
   final VoidCallback? onOpenCalendar;
 
   /// Role pre-resolved by AuthGate and passed down through MainShell.
-  /// When non-empty, HomeScreen uses this directly instead of reading
-  /// from the DB — eliminating the race condition where Google users
-  /// see 'Student' before the guest upsert finishes.
-  /// When empty (default), falls back to the DB value as before.
+  /// When non-empty it is used instead of the DB value, which avoids
+  /// Google users briefly seeing 'Student' before the guest upsert finishes.
   final String resolvedRole;
 
   const HomeScreen({
@@ -69,119 +65,125 @@ class _HomeScreenState extends State<HomeScreen> {
   @override
   void initState() {
     super.initState();
-    // Seed the role immediately from the resolved value so the pill
-    // shows the correct label even before the DB fetch completes.
-    if (widget.resolvedRole.isNotEmpty) {
-      _role = widget.resolvedRole;
-    }
+    // Seed the role so the pill is correct before the DB fetch completes.
+    if (widget.resolvedRole.isNotEmpty) _role = widget.resolvedRole;
     _loadAll();
     ActivityService.log(activityType: 'screen_view', referenceType: 'home');
   }
 
+  // ── Data loading ───────────────────────────────────────────────────────────
+
   Future<void> _loadAll() async {
-    setState(() => _loading = true);
+    final userId = _supabase.auth.currentUser?.id;
+    if (userId == null) {
+      if (mounted) setState(() => _loading = false);
+      return;
+    }
+
     try {
-      final userId = _supabase.auth.currentUser?.id;
-      if (userId == null) return;
+      final today = DateTime.now().toIso8601String().substring(0, 10);
+      final nowUtc = DateTime.now().toUtc().toIso8601String();
 
-      final profile = await _supabase
-          .from('profiles')
-          .select('full_name, role')
-          .eq('id', userId)
-          .maybeSingle();
+      // All queries are independent, so run them in parallel.
+      final (
+        profile,
+        modulesData,
+        progressData,
+        badgeRes,
+        seminarRes,
+        eventsData,
+        announcementsData,
+        live,
+      ) = await (
+        _supabase
+            .from('profiles')
+            .select('full_name, role')
+            .eq('id', userId)
+            .maybeSingle(),
+        _supabase
+            .from('modules')
+            .select('*, categories(name)')
+            .eq('status', 'published'),
+        _supabase
+            .from('module_progress')
+            .select('module_id, progress_percent, status')
+            .eq('user_id', userId),
+        _supabase
+            .from('student_badges')
+            .select('id')
+            .eq('user_id', userId)
+            .count(CountOption.exact),
+        _supabase
+            .from('seminar_registrations')
+            .select('id')
+            .eq('user_id', userId)
+            .count(CountOption.exact),
+        _supabase
+            .from('events')
+            .select('*')
+            .gte('start_date', today)
+            .order('start_date')
+            .limit(5),
+        _supabase
+            .from('announcements')
+            .select('id, title, body, is_pinned, published_at')
+            .lte('published_at', nowUtc)
+            .order('is_pinned', ascending: false)
+            .order('published_at', ascending: false)
+            .limit(3),
+        _fetchLiveSeminar(),
+      ).wait;
 
-      final modulesData = await _supabase
-          .from('modules')
-          .select('*, categories(name)')
-          .eq('status', 'published');
+      final progressMap = {
+        for (final p in progressData) p['module_id'] as String: p,
+      };
 
-      final progressData = await _supabase
-          .from('module_progress')
-          .select('module_id, progress_percent, status')
-          .eq('user_id', userId);
-
-      final progressMap = <String, Map<String, dynamic>>{};
-      for (final p in progressData as List) {
-        progressMap[p['module_id']] = p;
-      }
-
-      final allModules = (modulesData as List).map((m) {
-        final prog = progressMap[m['id']];
-        final pct = (prog?['progress_percent'] as num?)?.toInt() ?? 0;
+      final allModules = modulesData.map((m) {
+        final pct =
+            (progressMap[m['id']]?['progress_percent'] as num?)?.toInt() ?? 0;
         return ModuleModel.fromMap(m, progress: pct);
       }).toList();
 
-      final badgesData = await _supabase
-          .from('student_badges')
-          .select('id')
-          .eq('user_id', userId);
+      if (!mounted) return;
+      setState(() {
+        final fullName = profile?['full_name'] as String? ?? '';
+        _fullName = fullName.isEmpty ? 'Welcome!' : fullName;
+        _firstName = fullName.isEmpty ? '' : fullName.split(' ').first;
 
-      final seminarData = await _supabase
-          .from('seminar_registrations')
-          .select('id')
-          .eq('user_id', userId);
+        final dbRole = profile?['role'] as String? ?? '';
+        _role = widget.resolvedRole.isNotEmpty ? widget.resolvedRole : dbRole;
 
-      final eventsData = await _supabase
-          .from('events')
-          .select('*')
-          .gte('start_date', DateTime.now().toIso8601String().substring(0, 10))
-          .order('start_date')
-          .limit(5);
-
-      final announcementsData = await _supabase
-          .from('announcements')
-          .select('id, title, body, is_pinned, published_at')
-          .lte('published_at', DateTime.now().toIso8601String())
-          .order('is_pinned', ascending: false)
-          .order('published_at', ascending: false)
-          .limit(3);
-
-      final live = await _fetchLiveSeminar();
-
-      if (mounted) {
-        setState(() {
-          final fullName = profile?['full_name'] as String? ?? '';
-          _fullName  = fullName.isEmpty ? 'Welcome!' : fullName;
-          _firstName = fullName.isEmpty ? '' : fullName.split(' ').first;
-
-          // Use resolvedRole if provided — it was already written to DB
-          // by AuthGate before navigation, so it's the authoritative value.
-          // Fall back to DB value only when resolvedRole was not supplied.
-          final dbRole = profile?['role'] as String? ?? '';
-          _role = widget.resolvedRole.isNotEmpty ? widget.resolvedRole : dbRole;
-
-          _totalModules     = allModules.length;
-          _completedModules = allModules.where((m) => m.progress == 100).length;
-          _inProgressModules = allModules
-              .where((m) => m.progress > 0 && m.progress < 100)
-              .toList();
-          _badgeCount   = (badgesData as List).length;
-          _seminarCount = (seminarData as List).length;
-          _upcomingEvents = (eventsData as List)
-              .map((e) => EventModel.fromMap(e as Map<String, dynamic>))
-              .toList();
-          _announcements = List<Map<String, dynamic>>.from(announcementsData);
-          _live    = live;
-          _loading = false;
-        });
-      }
-    } catch (_) {
+        _totalModules = allModules.length;
+        _completedModules = allModules.where((m) => m.progress == 100).length;
+        _inProgressModules = allModules
+            .where((m) => m.progress > 0 && m.progress < 100)
+            .toList();
+        _badgeCount = badgeRes.count;
+        _seminarCount = seminarRes.count;
+        _upcomingEvents = eventsData.map(EventModel.fromMap).toList();
+        _announcements = List<Map<String, dynamic>>.from(announcementsData);
+        _live = live;
+        _loading = false;
+      });
+    } catch (e, st) {
+      debugPrint('HomeScreen._loadAll failed: $e\n$st');
       if (mounted) setState(() => _loading = false);
     }
   }
 
   Future<LiveSeminar?> _fetchLiveSeminar() async {
     try {
-      final nowIso = DateTime.now().toIso8601String();
+      // UTC so timestamptz comparisons aren't off by the local offset.
+      final nowUtc = DateTime.now().toUtc().toIso8601String();
       final rows = await _supabase
           .from('events')
           .select('id, title, start_date, end_date')
-          .lte('start_date', nowIso)
-          .gte('end_date', nowIso)
+          .lte('start_date', nowUtc)
+          .gte('end_date', nowUtc)
           .order('start_date')
           .limit(1);
 
-      if ((rows as List).isEmpty) return null;
+      if (rows.isEmpty) return null;
       final row = rows.first;
 
       int attendees = 0;
@@ -189,9 +191,12 @@ class _HomeScreenState extends State<HomeScreen> {
         final regs = await _supabase
             .from('seminar_registrations')
             .select('id')
-            .eq('event_id', row['id']);
-        attendees = (regs as List).length;
-      } catch (_) {}
+            .eq('seminar_id', row['id'])
+            .count(CountOption.exact);
+        attendees = regs.count;
+      } catch (e) {
+        debugPrint('Failed to load attendees for ${row['id']}: $e');
+      }
 
       return LiveSeminar(
         row['id'].toString(),
@@ -199,10 +204,13 @@ class _HomeScreenState extends State<HomeScreen> {
         attendees,
         'happening now',
       );
-    } catch (_) {
+    } catch (e) {
+      debugPrint('Failed to load live seminar: $e');
       return null;
     }
   }
+
+  // ── Helpers ────────────────────────────────────────────────────────────────
 
   String get _greeting {
     final h = DateTime.now().hour;
@@ -221,13 +229,14 @@ class _HomeScreenState extends State<HomeScreen> {
     }
   }
 
-  int get _overall =>
-      _totalModules == 0 ? 0 : ((_completedModules / _totalModules) * 100).round();
+  int get _overall => _totalModules == 0
+      ? 0
+      : ((_completedModules / _totalModules) * 100).round();
 
   String _initials(String name) {
     final parts = name.trim().split(RegExp(r'\s+'));
     if (parts.isEmpty || parts.first.isEmpty) return '?';
-    return parts.take(2).map((p) => p.isEmpty ? '' : p[0]).join().toUpperCase();
+    return parts.take(2).map((p) => p[0]).join().toUpperCase();
   }
 
   void _openModule(ModuleModel m) {
@@ -240,6 +249,16 @@ class _HomeScreenState extends State<HomeScreen> {
     widget.onSwitchTab(1);
   }
 
+  void _openCalendar() {
+    if (widget.onOpenCalendar != null) {
+      widget.onOpenCalendar!();
+    } else {
+      widget.onSwitchTab(2); // fallback: Events tab
+    }
+  }
+
+  // ── Build ──────────────────────────────────────────────────────────────────
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -249,96 +268,97 @@ class _HomeScreenState extends State<HomeScreen> {
         onRefresh: _loadAll,
         child: SingleChildScrollView(
           physics: const AlwaysScrollableScrollPhysics(),
-          padding: EdgeInsets.zero,
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
               _header(),
-              _loading
-                  ? const Padding(
-                      padding: EdgeInsets.only(top: 60),
-                      child: Center(
-                        child: CircularProgressIndicator(color: AppColors.primary),
-                      ),
-                    )
-                  : Padding(
-                      padding: const EdgeInsets.fromLTRB(16, 16, 16, 24),
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.stretch,
-                        children: [
-                          if (_live != null) ...[
-                            _LiveBanner(
-                              seminar: _live!,
-                              onTap: () => widget.onJoinLive != null
-                                  ? widget.onJoinLive!(_live!)
-                                  : widget.onSwitchTab(2),
-                            ),
-                            const SizedBox(height: 18),
-                          ],
-
-                          _quickActions(),
-                          const SizedBox(height: 20),
-
-                          if (_announcements.isNotEmpty) ...[
-                            SectionHeader(
-                              title: 'Announcements',
-                              action: 'See all',
-                              onAction: widget.onOpenNotifications,
-                            ),
-                            const SizedBox(height: 12),
-                            ..._announcements.map((a) => _AnnouncementCard(a: a)),
-                            const SizedBox(height: 8),
-                          ],
-
-                          SectionHeader(
-                            title: 'Continue Learning',
-                            action: 'View all',
-                            onAction: () => widget.onSwitchTab(1),
-                          ),
-                          const SizedBox(height: 12),
-                          if (_inProgressModules.isEmpty)
-                            _EmptyState(
-                              message: "You haven't started a module yet.",
-                              actionLabel: 'Go to Library',
-                              onAction: () => widget.onSwitchTab(1),
-                            )
-                          else ...[
-                            _ResumeHero(
-                              module: _inProgressModules.first,
-                              onTap: () => _openModule(_inProgressModules.first),
-                            ),
-                            ..._inProgressModules.skip(1).take(2).map(
-                                  (m) => Padding(
-                                    padding: const EdgeInsets.only(top: 10),
-                                    child: _ContinueRow(
-                                      module: m,
-                                      onTap: () => _openModule(m),
-                                    ),
-                                  ),
-                                ),
-                          ],
-                          const SizedBox(height: 20),
-
-                          SectionHeader(
-                            title: 'Upcoming Events',
-                            action: 'See all',
-                            onAction: () => widget.onSwitchTab(2),
-                          ),
-                          const SizedBox(height: 12),
-                          _upcomingEvents.isEmpty
-                              ? _EmptyState(
-                                  message: 'No events scheduled yet — check back soon.',
-                                  actionLabel: 'View calendar',
-                                  onAction: () => widget.onSwitchTab(2),
-                                )
-                              : _upcomingStrip(),
-                        ],
-                      ),
-                    ),
+              if (_loading)
+                const Padding(
+                  padding: EdgeInsets.only(top: 60),
+                  child: Center(
+                    child: CircularProgressIndicator(color: AppColors.primary),
+                  ),
+                )
+              else
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(16, 16, 16, 24),
+                  child: _body(),
+                ),
             ],
           ),
         ),
       ),
+    );
+  }
+
+  Widget _body() {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        if (_live != null) ...[
+          _LiveBanner(
+            seminar: _live!,
+            onTap: () => widget.onJoinLive != null
+                ? widget.onJoinLive!(_live!)
+                : widget.onSwitchTab(2),
+          ),
+          const SizedBox(height: 18),
+        ],
+
+        _quickActions(),
+        const SizedBox(height: 20),
+
+        if (_announcements.isNotEmpty) ...[
+          SectionHeader(
+            title: 'Announcements',
+            action: 'See all',
+            onAction: widget.onOpenNotifications,
+          ),
+          const SizedBox(height: 12),
+          ..._announcements.map((a) => _AnnouncementCard(a: a)),
+          const SizedBox(height: 8),
+        ],
+
+        SectionHeader(
+          title: 'Continue Learning',
+          action: 'View all',
+          onAction: () => widget.onSwitchTab(1),
+        ),
+        const SizedBox(height: 12),
+        if (_inProgressModules.isEmpty)
+          _EmptyState(
+            message: "You haven't started a module yet.",
+            actionLabel: 'Go to Library',
+            onAction: () => widget.onSwitchTab(1),
+          )
+        else ...[
+          _ResumeHero(
+            module: _inProgressModules.first,
+            onTap: () => _openModule(_inProgressModules.first),
+          ),
+          for (final m in _inProgressModules.skip(1).take(2))
+            Padding(
+              padding: const EdgeInsets.only(top: 10),
+              child: _ContinueRow(module: m, onTap: () => _openModule(m)),
+            ),
+        ],
+        const SizedBox(height: 20),
+
+        SectionHeader(
+          title: 'Upcoming Events',
+          action: 'See all',
+          onAction: () => widget.onSwitchTab(2),
+        ),
+        const SizedBox(height: 12),
+        if (_upcomingEvents.isEmpty)
+          _EmptyState(
+            message: 'No events scheduled yet — check back soon.',
+            actionLabel: 'View calendar',
+            onAction: () => widget.onSwitchTab(2),
+          )
+        else
+          _upcomingStrip(),
+      ],
     );
   }
 
@@ -354,7 +374,8 @@ class _HomeScreenState extends State<HomeScreen> {
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Container(
-                  width: 46, height: 46,
+                  width: 46,
+                  height: 46,
                   decoration: BoxDecoration(
                     color: Colors.white.withValues(alpha: 0.22),
                     shape: BoxShape.circle,
@@ -395,7 +416,8 @@ class _HomeScreenState extends State<HomeScreen> {
                       ),
                       const SizedBox(height: 6),
                       Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 3),
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 10, vertical: 3),
                         decoration: BoxDecoration(
                           color: Colors.white.withValues(alpha: 0.18),
                           borderRadius: BorderRadius.circular(20),
@@ -427,7 +449,8 @@ class _HomeScreenState extends State<HomeScreen> {
     return GestureDetector(
       onTap: widget.onOpenNotifications,
       child: Container(
-        width: 44, height: 44,
+        width: 44,
+        height: 44,
         decoration: BoxDecoration(
           color: Colors.white.withValues(alpha: 0.2),
           borderRadius: BorderRadius.circular(14),
@@ -435,10 +458,12 @@ class _HomeScreenState extends State<HomeScreen> {
         child: Stack(
           alignment: Alignment.center,
           children: [
-            const Icon(Icons.notifications_outlined, color: Colors.white, size: 22),
+            const Icon(Icons.notifications_outlined,
+                color: Colors.white, size: 22),
             if (widget.unreadCount > 0)
               Positioned(
-                top: 8, right: 8,
+                top: 8,
+                right: 8,
                 child: Container(
                   padding: const EdgeInsets.symmetric(horizontal: 4),
                   constraints: const BoxConstraints(minWidth: 16),
@@ -474,7 +499,8 @@ class _HomeScreenState extends State<HomeScreen> {
       child: Row(
         children: [
           SizedBox(
-            width: 64, height: 64,
+            width: 64,
+            height: 64,
             child: CustomPaint(
               painter: _RingPainter(_overall / 100),
               child: Center(
@@ -504,7 +530,8 @@ class _HomeScreenState extends State<HomeScreen> {
                 ),
                 const SizedBox(height: 4),
                 Text(
-                  '$_completedModules of $_totalModules modules complete · $_badgeCount badges · $_seminarCount seminars',
+                  '$_completedModules of $_totalModules modules complete · '
+                  '$_badgeCount badges · $_seminarCount seminars',
                   style: GoogleFonts.nunito(
                     color: Colors.white.withValues(alpha: 0.78),
                     fontSize: 12,
@@ -521,54 +548,50 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   Widget _quickActions() {
-    final items = [
-      (Icons.menu_book_rounded,          'Modules',      AppColors.primary, 1),
-      (Icons.school_rounded,             'Seminars',     AppColors.purple,  2),
-      (Icons.workspace_premium_rounded,  'Certificates', AppColors.accent,  3),
-      (Icons.calendar_month_rounded,     'Calendar',     AppColors.info,    -1),
+    final items = <(IconData, String, Color, VoidCallback)>[
+      (Icons.menu_book_rounded, 'Modules', AppColors.primary,
+          () => widget.onSwitchTab(1)),
+      (Icons.school_rounded, 'Seminars', AppColors.purple,
+          () => widget.onSwitchTab(2)),
+      (Icons.workspace_premium_rounded, 'Certificates', AppColors.accent,
+          () => widget.onSwitchTab(3)),
+      (Icons.calendar_month_rounded, 'Calendar', AppColors.info,
+          _openCalendar),
     ];
+
     return Row(
-      children: items.map((it) {
-        return Expanded(
-          child: GestureDetector(
-            onTap: () {
-              if (it.$4 == -1) {
-                // Calendar tile — opens the Calendar sub-tab of Events directly.
-                if (widget.onOpenCalendar != null) {
-                  widget.onOpenCalendar!();
-                } else {
-                  widget.onSwitchTab(2); // fallback: Events tab
-                }
-              } else {
-                widget.onSwitchTab(it.$4);
-              }
-            },
-            behavior: HitTestBehavior.opaque,
-            child: Column(
-              children: [
-                Container(
-                  width: 52, height: 52,
-                  decoration: BoxDecoration(
-                    color: it.$3.withValues(alpha: 0.12),
-                    borderRadius: BorderRadius.circular(16),
+      children: [
+        for (final (icon, label, color, onTap) in items)
+          Expanded(
+            child: GestureDetector(
+              onTap: onTap,
+              behavior: HitTestBehavior.opaque,
+              child: Column(
+                children: [
+                  Container(
+                    width: 52,
+                    height: 52,
+                    decoration: BoxDecoration(
+                      color: color.withValues(alpha: 0.12),
+                      borderRadius: BorderRadius.circular(16),
+                    ),
+                    child: Icon(icon, color: color, size: 24),
                   ),
-                  child: Icon(it.$1, color: it.$3, size: 24),
-                ),
-                const SizedBox(height: 7),
-                Text(
-                  it.$2,
-                  textAlign: TextAlign.center,
-                  style: GoogleFonts.nunito(
-                    fontSize: 10,
-                    fontWeight: FontWeight.w700,
-                    color: AppColors.textMid,
+                  const SizedBox(height: 7),
+                  Text(
+                    label,
+                    textAlign: TextAlign.center,
+                    style: GoogleFonts.nunito(
+                      fontSize: 10,
+                      fontWeight: FontWeight.w700,
+                      color: AppColors.textMid,
+                    ),
                   ),
-                ),
-              ],
+                ],
+              ),
             ),
           ),
-        );
-      }).toList(),
+      ],
     );
   }
 
@@ -594,6 +617,9 @@ class _LiveBanner extends StatelessWidget {
   final VoidCallback onTap;
   const _LiveBanner({required this.seminar, required this.onTap});
 
+  static const _green = Color(0xFF16A34A);
+  static const _greenDark = Color(0xFF0E7A38);
+
   @override
   Widget build(BuildContext context) {
     return GestureDetector(
@@ -604,12 +630,12 @@ class _LiveBanner extends StatelessWidget {
           gradient: const LinearGradient(
             begin: Alignment.topLeft,
             end: Alignment.bottomRight,
-            colors: [Color(0xFF16A34A), Color(0xFF0E7A38)],
+            colors: [_green, _greenDark],
           ),
           borderRadius: BorderRadius.circular(16),
           boxShadow: [
             BoxShadow(
-              color: const Color(0xFF16A34A).withValues(alpha: 0.32),
+              color: _green.withValues(alpha: 0.32),
               blurRadius: 18,
               offset: const Offset(0, 6),
             ),
@@ -618,12 +644,14 @@ class _LiveBanner extends StatelessWidget {
         child: Row(
           children: [
             Container(
-              width: 46, height: 46,
+              width: 46,
+              height: 46,
               decoration: BoxDecoration(
                 color: Colors.white.withValues(alpha: 0.2),
                 borderRadius: BorderRadius.circular(14),
               ),
-              child: const Icon(Icons.sensors_rounded, color: Colors.white, size: 24),
+              child: const Icon(Icons.sensors_rounded,
+                  color: Colors.white, size: 24),
             ),
             const SizedBox(width: 12),
             Expanded(
@@ -633,18 +661,21 @@ class _LiveBanner extends StatelessWidget {
                   Row(
                     children: [
                       Container(
-                        width: 7, height: 7,
+                        width: 7,
+                        height: 7,
                         decoration: const BoxDecoration(
                             color: Colors.white, shape: BoxShape.circle),
                       ),
                       const SizedBox(width: 6),
-                      Text('LIVE NOW',
-                          style: GoogleFonts.nunito(
-                            color: Colors.white,
-                            fontSize: 10,
-                            fontWeight: FontWeight.w900,
-                            letterSpacing: 0.6,
-                          )),
+                      Text(
+                        'LIVE NOW',
+                        style: GoogleFonts.nunito(
+                          color: Colors.white,
+                          fontSize: 10,
+                          fontWeight: FontWeight.w900,
+                          letterSpacing: 0.6,
+                        ),
+                      ),
                     ],
                   ),
                   const SizedBox(height: 4),
@@ -682,15 +713,16 @@ class _LiveBanner extends StatelessWidget {
               child: Row(
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  const Icon(Icons.login_rounded,
-                      color: Color(0xFF0E7A38), size: 15),
+                  const Icon(Icons.login_rounded, color: _greenDark, size: 15),
                   const SizedBox(width: 4),
-                  Text('Join',
-                      style: GoogleFonts.nunito(
-                        color: const Color(0xFF0E7A38),
-                        fontSize: 12,
-                        fontWeight: FontWeight.w900,
-                      )),
+                  Text(
+                    'Join',
+                    style: GoogleFonts.nunito(
+                      color: _greenDark,
+                      fontSize: 12,
+                      fontWeight: FontWeight.w900,
+                    ),
+                  ),
                 ],
               ),
             ),
@@ -741,17 +773,20 @@ class _ResumeHero extends StatelessWidget {
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 3),
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 10, vertical: 3),
                     decoration: BoxDecoration(
                       color: Colors.white.withValues(alpha: 0.22),
                       borderRadius: BorderRadius.circular(20),
                     ),
-                    child: Text('In progress',
-                        style: GoogleFonts.nunito(
-                          color: Colors.white,
-                          fontSize: 11,
-                          fontWeight: FontWeight.w800,
-                        )),
+                    child: Text(
+                      'In progress',
+                      style: GoogleFonts.nunito(
+                        color: Colors.white,
+                        fontSize: 11,
+                        fontWeight: FontWeight.w800,
+                      ),
+                    ),
                   ),
                   const SizedBox(height: 8),
                   Text(
@@ -776,18 +811,21 @@ class _ResumeHero extends StatelessWidget {
                       children: [
                         AppProgressBar(value: module.progress),
                         const SizedBox(height: 5),
-                        Text('${module.progress}% complete',
-                            style: GoogleFonts.nunito(
-                              fontSize: 11,
-                              fontWeight: FontWeight.w600,
-                              color: AppColors.textLight,
-                            )),
+                        Text(
+                          '${module.progress}% complete',
+                          style: GoogleFonts.nunito(
+                            fontSize: 11,
+                            fontWeight: FontWeight.w600,
+                            color: AppColors.textLight,
+                          ),
+                        ),
                       ],
                     ),
                   ),
                   const SizedBox(width: 14),
                   Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
                     decoration: BoxDecoration(
                       color: AppColors.primary,
                       borderRadius: BorderRadius.circular(999),
@@ -805,12 +843,14 @@ class _ResumeHero extends StatelessWidget {
                         const Icon(Icons.play_arrow_rounded,
                             color: Colors.white, size: 16),
                         const SizedBox(width: 6),
-                        Text('Resume',
-                            style: GoogleFonts.nunito(
-                              color: Colors.white,
-                              fontSize: 13,
-                              fontWeight: FontWeight.w800,
-                            )),
+                        Text(
+                          'Resume',
+                          style: GoogleFonts.nunito(
+                            color: Colors.white,
+                            fontSize: 13,
+                            fontWeight: FontWeight.w800,
+                          ),
+                        ),
                       ],
                     ),
                   ),
@@ -839,7 +879,8 @@ class _ContinueRow extends StatelessWidget {
         child: Row(
           children: [
             Container(
-              width: 44, height: 44,
+              width: 44,
+              height: 44,
               decoration: BoxDecoration(
                 color: AppColors.primary.withValues(alpha: 0.12),
                 borderRadius: BorderRadius.circular(12),
@@ -915,12 +956,14 @@ class _EventCard extends StatelessWidget {
                     children: [
                       Icon(Icons.calendar_today_rounded, color: color, size: 14),
                       const SizedBox(width: 6),
-                      Text(event.date,
-                          style: GoogleFonts.nunito(
-                            color: color,
-                            fontSize: 12,
-                            fontWeight: FontWeight.w900,
-                          )),
+                      Text(
+                        event.date,
+                        style: GoogleFonts.nunito(
+                          color: color,
+                          fontSize: 12,
+                          fontWeight: FontWeight.w900,
+                        ),
+                      ),
                     ],
                   ),
                   const SizedBox(height: 8),
@@ -976,8 +1019,8 @@ class _AnnouncementCard extends StatelessWidget {
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           if (pinned)
-            Padding(
-              padding: const EdgeInsets.only(right: 8, top: 2),
+            const Padding(
+              padding: EdgeInsets.only(right: 8, top: 2),
               child: Icon(Icons.push_pin_rounded,
                   size: 14, color: AppColors.primary),
             ),
@@ -986,7 +1029,7 @@ class _AnnouncementCard extends StatelessWidget {
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Text(
-                  a['title'] ?? '',
+                  a['title'] as String? ?? '',
                   style: GoogleFonts.nunito(
                     fontWeight: FontWeight.w800,
                     fontSize: 13,
@@ -995,7 +1038,7 @@ class _AnnouncementCard extends StatelessWidget {
                 ),
                 const SizedBox(height: 4),
                 Text(
-                  a['body'] ?? a['content'] ?? '',
+                  a['body'] as String? ?? '',
                   maxLines: 2,
                   overflow: TextOverflow.ellipsis,
                   style: GoogleFonts.nunito(
@@ -1029,8 +1072,7 @@ class _EmptyState extends StatelessWidget {
           Text(
             message,
             textAlign: TextAlign.center,
-            style: GoogleFonts.nunito(
-                fontSize: 13, color: AppColors.textLight),
+            style: GoogleFonts.nunito(fontSize: 13, color: AppColors.textLight),
           ),
           const SizedBox(height: 10),
           GestureDetector(
@@ -1055,27 +1097,30 @@ class _RingPainter extends CustomPainter {
   final double pct;
   _RingPainter(this.pct);
 
+  static const _stroke = 7.0;
+  static const _startAngle = -1.5708; // -π/2, i.e. 12 o'clock
+  static const _fullCircle = 6.2832;  // 2π
+
   @override
   void paint(Canvas canvas, Size size) {
-    const stroke = 7.0;
     final center = Offset(size.width / 2, size.height / 2);
-    final radius = (size.width - stroke) / 2;
+    final radius = (size.width - _stroke) / 2;
 
     final track = Paint()
       ..color = Colors.white.withValues(alpha: 0.28)
       ..style = PaintingStyle.stroke
-      ..strokeWidth = stroke;
+      ..strokeWidth = _stroke;
     canvas.drawCircle(center, radius, track);
 
     final arc = Paint()
       ..color = Colors.white
       ..style = PaintingStyle.stroke
-      ..strokeWidth = stroke
+      ..strokeWidth = _stroke
       ..strokeCap = StrokeCap.round;
     canvas.drawArc(
       Rect.fromCircle(center: center, radius: radius),
-      -1.5708,
-      6.2832 * pct,
+      _startAngle,
+      _fullCircle * pct,
       false,
       arc,
     );
