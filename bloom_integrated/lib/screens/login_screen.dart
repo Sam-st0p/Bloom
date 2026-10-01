@@ -3,57 +3,52 @@
 //
 // Constructor API matches _AuthNavigator in main.dart:
 //   onLogin      → called after successful email/password sign-in
-//                  (AuthGate's onAuthStateChange fires the role check)
-//   onGuestLogin → called after Google sign-in succeeds (guest role, straight to app)
+//   onGuestLogin → called after Google sign-in succeeds
 //   onGoSignup   → navigate to SignupScreen
 //
-// @cvsu.edu.ph email is enforced on the client. AuthService.signIn()
-// is a thin wrapper around Supabase signInWithPassword.
-// OTP is NOT required for login — only for signup email verification.
-
+// Access is limited to the BLOOM masterlist:
+//   • CvSU students/staff with their @cvsu.edu.ph email
+//   • Outsiders added by the GADRC admin (any email, e.g. Gmail)
+// Google sign-in is also checked against the masterlist (AuthService).
+ 
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import '../theme/app_theme.dart';
 import '../utils/validators.dart';
 import '../services/auth_service.dart';
-
+ 
+ 
 class LoginScreen extends StatefulWidget {
-  /// Called after successful email/password sign-in.
-  /// AuthGate's onAuthStateChange handles navigation from here.
   final void Function(String email) onLogin;
-
-  /// Called after Google sign-in succeeds. Skips role selection (guest).
   final VoidCallback onGuestLogin;
-
-  /// Navigate to the sign-up screen.
   final VoidCallback onGoSignup;
-
+ 
   const LoginScreen({
     super.key,
     required this.onLogin,
     required this.onGuestLogin,
     required this.onGoSignup,
   });
-
+ 
   @override
   State<LoginScreen> createState() => _LoginScreenState();
 }
-
+ 
+ 
 class _LoginScreenState extends State<LoginScreen> {
   final _formKey     = GlobalKey<FormState>();
   final _emailCtrl   = TextEditingController();
   final _passCtrl    = TextEditingController();
-
-  // Owned by this State (not created/disposed per sheet-open) so it can
-  // never be torn down while the "forgot password" sheet is still
-  // animating off-screen. See _showForgotPassword() for why that matters.
+ 
+  // Owned by this State so it is never disposed while the
+  // "forgot password" sheet is still animating off-screen.
   final _resetCtrl = TextEditingController();
-
+ 
   bool    _obscurePass = true;
   bool    _loading     = false;
   String? _error;
-
+ 
   @override
   void dispose() {
     _emailCtrl.dispose();
@@ -61,72 +56,48 @@ class _LoginScreenState extends State<LoginScreen> {
     _resetCtrl.dispose();
     super.dispose();
   }
-
+ 
   // ── Helpers ───────────────────────────────────────────────────────────────
-
+ 
+  bool get _isValidEmail => AppValidators.email(_emailCtrl.text) == null;
+ 
   bool get _isCvsuEmail =>
       _emailCtrl.text.trim().toLowerCase().endsWith('@cvsu.edu.ph');
-
+ 
   // ── Email / password sign-in ──────────────────────────────────────────────
-
+ 
   Future<void> _handleLogin() async {
     if (_loading) return;
     setState(() => _error = null);
-
+ 
     if (!(_formKey.currentState?.validate() ?? false)) return;
-
+ 
     setState(() => _loading = true);
-
+ 
     final error = await AuthService.signIn(
       AppValidators.normalizeEmail(_emailCtrl.text),
       _passCtrl.text,
     );
-
+ 
     if (!mounted) return;
-
+ 
     if (error != null) {
       setState(() { _error = error; _loading = false; });
       return;
     }
-
-    // Auth state listener in AuthGate takes it from here.
+ 
     widget.onLogin(AppValidators.normalizeEmail(_emailCtrl.text));
   }
-
+ 
   // ── Forgot password ───────────────────────────────────────────────────────
-  //
-  // FIX #1 (context-after-pop): previously this captured the outer
-  // (LoginScreen) BuildContext inside the bottom sheet's button callback and
-  // used it AFTER calling Navigator.pop(ctx). Once the sheet's element tree
-  // starts unmounting, using a context whose dependents are still being torn
-  // down can throw "_dependents.isEmpty is not true" inside Flutter's
-  // InheritedWidget bookkeeping. Fixed by capturing the
-  // ScaffoldMessengerState reference up-front (the STATE object, not
-  // context) and only ever notifying via that captured reference, scheduled
-  // with a post-frame callback so we never touch a disposing context
-  // synchronously.
-  //
-  // FIX #2 (controller-disposed-mid-animation): previously a fresh
-  // TextEditingController was created every time this method ran and
-  // disposed via showModalBottomSheet(...).whenComplete(). That future
-  // completes as soon as the route is POPPED — which happens the instant a
-  // swipe-down drag crosses the dismiss threshold, not after the sheet's
-  // slide-down transition finishes painting. The sheet (and its
-  // TextFormField) is still on screen and rebuilding for a few more frames
-  // after that, so it ended up using a controller that had already been
-  // disposed → "A TextEditingController was used after being disposed."
-  // Fixed by hoisting the controller (_resetCtrl) to State-level so it is
-  // only ever disposed once, in this State's dispose(), never mid-animation.
-
+ 
   void _showForgotPassword() {
     final rootMessenger = ScaffoldMessenger.of(context);
-
-    // Reset the value each time the sheet opens instead of creating a new
-    // controller — see FIX #2 above.
-    _resetCtrl.text = _isCvsuEmail ? _emailCtrl.text.trim() : '';
+ 
+    _resetCtrl.text = _isValidEmail ? _emailCtrl.text.trim() : '';
     final resetFormKey = GlobalKey<FormState>();
     bool sending = false;
-
+ 
     showModalBottomSheet(
       context: context,
       backgroundColor: Colors.transparent,
@@ -147,7 +118,6 @@ class _LoginScreenState extends State<LoginScreen> {
                 mainAxisSize: MainAxisSize.min,
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  // Drag handle
                   Center(
                     child: Container(
                       width: 40, height: 4,
@@ -156,7 +126,7 @@ class _LoginScreenState extends State<LoginScreen> {
                           borderRadius: BorderRadius.circular(2))),
                   ),
                   const SizedBox(height: 20),
-
+ 
                   Row(children: [
                     Container(
                       width: 40, height: 40,
@@ -175,30 +145,22 @@ class _LoginScreenState extends State<LoginScreen> {
                               fontSize: 18,
                               fontWeight: FontWeight.w900,
                               color: AppColors.textDark)),
-                      Text('Enter your @cvsu.edu.ph email',
+                      Text('Enter the email you registered with',
                           style: GoogleFonts.nunito(
                               fontSize: 12, color: AppColors.textLight)),
                     ]),
                   ]),
                   const SizedBox(height: 20),
-
+ 
                   TextFormField(
                     controller:   _resetCtrl,
                     keyboardType: TextInputType.emailAddress,
                     autocorrect:  false,
                     style: GoogleFonts.nunito(
                         fontSize: 14, color: AppColors.textDark),
-                    validator: (v) {
-                      if (v == null || v.trim().isEmpty) {
-                        return 'Email is required.';
-                      }
-                      if (!v.trim().toLowerCase().endsWith('@cvsu.edu.ph')) {
-                        return 'Only @cvsu.edu.ph emails are accepted.';
-                      }
-                      return null;
-                    },
+                    validator: AppValidators.email,
                     decoration: InputDecoration(
-                      hintText:  'you@cvsu.edu.ph',
+                      hintText:  'you@cvsu.edu.ph or your email',
                       hintStyle: GoogleFonts.nunito(
                           color: AppColors.textLight, fontSize: 13),
                       prefixIcon: const Icon(Icons.mail_outline,
@@ -225,7 +187,7 @@ class _LoginScreenState extends State<LoginScreen> {
                     ),
                   ),
                   const SizedBox(height: 20),
-
+ 
                   SizedBox(
                     width: double.infinity,
                     height: 50,
@@ -235,28 +197,20 @@ class _LoginScreenState extends State<LoginScreen> {
                           return;
                         }
                         setSheetState(() => sending = true);
-
+ 
                         final emailToSend = _resetCtrl.text.trim();
-
+ 
                         try {
                           await Supabase.instance.client.auth
                               .resetPasswordForEmail(
                             emailToSend.toLowerCase(),
                             redirectTo: 'io.supabase.bloom://reset-callback',
                           );
-
-                          // Close the sheet FIRST. Do not touch sheetCtx or
-                          // the outer context again after this point inside
-                          // this synchronous block — schedule any further
-                          // UI feedback via the messenger captured earlier.
+ 
                           if (sheetCtx.mounted) {
                             Navigator.pop(sheetCtx);
                           }
-
-                          // Defer to the next frame so we're guaranteed the
-                          // sheet's element tree has finished unmounting
-                          // before we touch the (already-safe) root
-                          // ScaffoldMessenger reference.
+ 
                           WidgetsBinding.instance.addPostFrameCallback((_) {
                             rootMessenger.showSnackBar(
                               SnackBar(
@@ -318,51 +272,40 @@ class _LoginScreenState extends State<LoginScreen> {
           ),
         ),
       ),
-      // NOTE: no .whenComplete(() => _resetCtrl.dispose()) here anymore —
-      // _resetCtrl is owned by the State and disposed once in dispose().
     );
   }
-
-  // ── Google sign-in → guest role ───────────────────────────────────────────
-
+ 
+  // ── Google sign-in (masterlist only) ──────────────────────────────────────
+ 
   Future<void> _handleGoogleLogin() async {
     if (_loading) return;
     setState(() { _loading = true; _error = null; });
     try {
+      // AuthService checks the masterlist and sets the role from it.
       final error = await AuthService.signInWithGoogle();
       if (!mounted) return;
-
+ 
       if (error != null) {
         if (error != 'Google sign-in cancelled.') {
           setState(() => _error = error);
         }
         return;
       }
-
-      // Auto-assign guest role so AuthGate skips RoleSelectionScreen.
-      final userId = Supabase.instance.client.auth.currentUser?.id;
-      if (userId != null) {
-        await Supabase.instance.client.from('profiles').upsert({
-          'id':         userId,
-          'role':       'guest',
-          'updated_at': DateTime.now().toIso8601String(),
-        }, onConflict: 'id');
-      }
-
+ 
       widget.onGuestLogin();
     } finally {
       if (mounted) setState(() => _loading = false);
     }
   }
-
+ 
   // ── Build ─────────────────────────────────────────────────────────────────
-
+ 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       backgroundColor: AppColors.background,
       body: Column(children: [
-
+ 
         // ── Gradient header ────────────────────────────────────────────
         Container(
           width: double.infinity,
@@ -379,7 +322,6 @@ class _LoginScreenState extends State<LoginScreen> {
           ),
           padding: const EdgeInsets.fromLTRB(32, 64, 32, 48),
           child: Column(children: [
-            // Logo box
             Container(
               width: 76, height: 76,
               decoration: BoxDecoration(
@@ -402,7 +344,6 @@ class _LoginScreenState extends State<LoginScreen> {
                     color:    Colors.white.withValues(alpha: 0.75),
                     fontSize: 13)),
             const SizedBox(height: 12),
-            // CvSU-only badge
             Container(
               padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
               decoration: BoxDecoration(
@@ -414,10 +355,10 @@ class _LoginScreenState extends State<LoginScreen> {
               child: Row(
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  const Icon(Icons.school_rounded,
+                  const Icon(Icons.verified_user_rounded,
                       color: Colors.white, size: 14),
                   const SizedBox(width: 6),
-                  Text('Exclusive to CvSU students & staff',
+                  Text('For CvSU & GADRC-registered participants',
                       style: GoogleFonts.nunito(
                           color:      Colors.white,
                           fontSize:   11,
@@ -427,7 +368,7 @@ class _LoginScreenState extends State<LoginScreen> {
             ),
           ]),
         ),
-
+ 
         // ── Form body ──────────────────────────────────────────────────
         Expanded(
           child: SingleChildScrollView(
@@ -437,8 +378,8 @@ class _LoginScreenState extends State<LoginScreen> {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-
-                  // ── Google (Guest) button ────────────────────────────
+ 
+                  // ── Google button ────────────────────────────────────
                   SizedBox(
                     width: double.infinity,
                     child: OutlinedButton(
@@ -472,19 +413,6 @@ class _LoginScreenState extends State<LoginScreen> {
                                   fontSize:   15,
                                   fontWeight: FontWeight.w700,
                                   color:      AppColors.textDark)),
-                          const SizedBox(width: 8),
-                          Container(
-                            padding: const EdgeInsets.symmetric(
-                                horizontal: 6, vertical: 2),
-                            decoration: BoxDecoration(
-                              color:        Colors.grey.shade100,
-                              borderRadius: BorderRadius.circular(6)),
-                            child: Text('Guest',
-                                style: GoogleFonts.nunito(
-                                    fontSize:   10,
-                                    fontWeight: FontWeight.w700,
-                                    color:      AppColors.textLight)),
-                          ),
                         ],
                       ),
                     ),
@@ -492,25 +420,25 @@ class _LoginScreenState extends State<LoginScreen> {
                   const SizedBox(height: 8),
                   Center(
                     child: Text(
-                      'Google accounts are granted guest access only',
+                      'Your Google email must be in the BLOOM masterlist',
                       style: GoogleFonts.nunito(
                           fontSize: 11, color: AppColors.textLight),
                     ),
                   ),
                   const SizedBox(height: 20),
-
+ 
                   // ── Divider ──────────────────────────────────────────
                   Row(children: [
                     const Expanded(child: Divider()),
                     Padding(
                       padding: const EdgeInsets.symmetric(horizontal: 12),
-                      child: Text('or sign in with CvSU email',
+                      child: Text('or sign in with email',
                           style: GoogleFonts.nunito(
                               color: AppColors.textLight, fontSize: 13))),
                     const Expanded(child: Divider()),
                   ]),
                   const SizedBox(height: 20),
-
+ 
                   // ── Error banner ─────────────────────────────────────
                   if (_error != null) ...[
                     Container(
@@ -534,32 +462,24 @@ class _LoginScreenState extends State<LoginScreen> {
                     ),
                     const SizedBox(height: 16),
                   ],
-
+ 
                   // ── Email ────────────────────────────────────────────
-                  _buildLabel('CVSU EMAIL'),
+                  _buildLabel('EMAIL'),
                   const SizedBox(height: 8),
                   _buildFormField(
                     ctrl:      _emailCtrl,
-                    hint:      'you@cvsu.edu.ph',
+                    hint:      'you@cvsu.edu.ph or your registered email',
                     icon:      Icons.mail_outline,
                     inputType: TextInputType.emailAddress,
                     onChanged: (_) => setState(() {}),
-                    validator: (v) {
-                      final base = AppValidators.email(v);
-                      if (base != null) return base;
-                      if (!(v ?? '').trim().toLowerCase()
-                          .endsWith('@cvsu.edu.ph')) {
-                        return 'Only @cvsu.edu.ph emails are accepted here.';
-                      }
-                      return null;
-                    },
+                    validator: AppValidators.email,
                     suffix: _isCvsuEmail
                         ? const Icon(Icons.verified_outlined,
                             color: Colors.green, size: 20)
                         : null,
                   ),
                   const SizedBox(height: 16),
-
+ 
                   // ── Password ─────────────────────────────────────────
                   _buildLabel('PASSWORD'),
                   const SizedBox(height: 8),
@@ -595,7 +515,7 @@ class _LoginScreenState extends State<LoginScreen> {
                     ),
                   ),
                   const SizedBox(height: 20),
-
+ 
                   // ── Sign in button ────────────────────────────────────
                   SizedBox(
                     width: double.infinity,
@@ -623,7 +543,7 @@ class _LoginScreenState extends State<LoginScreen> {
                     ),
                   ),
                   const SizedBox(height: 16),
-
+ 
                   // ── Sign up link ──────────────────────────────────────
                   Center(
                     child: GestureDetector(
@@ -644,7 +564,7 @@ class _LoginScreenState extends State<LoginScreen> {
                     ),
                   ),
                   const SizedBox(height: 24),
-
+ 
                   // ── Info note ─────────────────────────────────────────
                   Container(
                     padding: const EdgeInsets.all(14),
@@ -659,9 +579,11 @@ class _LoginScreenState extends State<LoginScreen> {
                         const SizedBox(width: 10),
                         Expanded(
                           child: Text(
-                            'BLOOM is exclusively for Cavite State University '
-                            'students and staff. You must use your '
-                            '@cvsu.edu.ph institutional email to sign in.',
+                            'BLOOM is for Cavite State University students and '
+                            'staff, and for participants registered by the GADRC. '
+                            'CvSU members use their @cvsu.edu.ph email; other '
+                            'participants use the email the GADRC added to the '
+                            'masterlist.',
                             style: GoogleFonts.nunito(
                                 fontSize: 12,
                                 color:    AppColors.textMid,
@@ -676,9 +598,9 @@ class _LoginScreenState extends State<LoginScreen> {
       ]),
     );
   }
-
+ 
   // ── Reusable field builders ───────────────────────────────────────────────
-
+ 
   Widget _buildFormField({
     required TextEditingController ctrl,
     required String hint,
@@ -725,7 +647,7 @@ class _LoginScreenState extends State<LoginScreen> {
       ),
     );
   }
-
+ 
   Widget _buildLabel(String text) => Text(text,
       style: GoogleFonts.nunito(
           fontSize:      12,

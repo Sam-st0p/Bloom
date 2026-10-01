@@ -1,16 +1,20 @@
 // lib/screens/signup_screen.dart
 // BLOOM GAD Mobile App — Signup Screen
-
+//
+// Only people in the BLOOM masterlist can create an account:
+//   • CvSU students/staff with their @cvsu.edu.ph email
+//   • Outsiders added by the GADRC admin (any email, e.g. Gmail)
+ 
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
-import 'package:supabase_flutter/supabase_flutter.dart';
 import '../theme/app_theme.dart';
 import '../utils/validators.dart';
 import '../services/auth_service.dart';
-
+ 
+ 
 class SignupScreen extends StatefulWidget {
   final VoidCallback onGoLogin;
-
+ 
   final void Function({
     required String  email,
     required String  fullName,
@@ -20,20 +24,21 @@ class SignupScreen extends StatefulWidget {
     required String? course,
     required int?    yearLevel,
   }) onNeedsOtp;
-
+ 
   final VoidCallback? onGuestSignup;
-
+ 
   const SignupScreen({
     super.key,
     required this.onGoLogin,
     required this.onNeedsOtp,
     this.onGuestSignup,
   });
-
+ 
   @override
   State<SignupScreen> createState() => _SignupScreenState();
 }
-
+ 
+ 
 class _SignupScreenState extends State<SignupScreen> {
   final _formKey       = GlobalKey<FormState>();
   final _firstNameCtrl = TextEditingController();
@@ -41,12 +46,12 @@ class _SignupScreenState extends State<SignupScreen> {
   final _emailCtrl     = TextEditingController();
   final _passCtrl      = TextEditingController();
   final _confirmCtrl   = TextEditingController();
-
+ 
   bool    _obscurePass    = true;
   bool    _obscureConfirm = true;
   bool    _loading        = false;
   String? _error;
-
+ 
   @override
   void dispose() {
     _firstNameCtrl.dispose();
@@ -56,68 +61,58 @@ class _SignupScreenState extends State<SignupScreen> {
     _confirmCtrl.dispose();
     super.dispose();
   }
-
+ 
   bool get _isCvsuEmail =>
       RegExp(r'^[^@]+@cvsu\.edu\.ph$')
           .hasMatch(_emailCtrl.text.trim().toLowerCase());
-
+ 
   Future<void> _handleSignup() async {
     if (_loading) return;
     setState(() => _error = null);
-
+ 
     if (!_formKey.currentState!.validate()) return;
-
-    if (!_isCvsuEmail) {
-      setState(() => _error =
-          'Only @cvsu.edu.ph institutional emails can create an account here.\n'
-          'Use "Continue with Google" for other accounts.');
-      return;
-    }
-
+ 
     setState(() => _loading = true);
-
+ 
     final cleanEmail = AppValidators.normalizeEmail(_emailCtrl.text);
-
-    // ── Guard 1: masterlist check ─────────────────────────────────────
+ 
+    // ── Guard 1: masterlist check (CvSU emails AND admin-added outsiders) ──
     final masterlistError = await AuthService.checkMasterlist(cleanEmail);
     if (!mounted) return;
     if (masterlistError != null) {
       setState(() { _error = masterlistError; _loading = false; });
       return;
     }
-
+ 
     // ── Guard 2: duplicate account check ──────────────────────────────
-    // Supabase silently re-sends OTP for already-registered emails when
-    // email confirmation is on, returning no error. We detect this by
-    // checking the profiles table — if a row exists, the account is taken.
     final duplicateError = await AuthService.checkEmailAlreadyRegistered(cleanEmail);
     if (!mounted) return;
     if (duplicateError != null) {
       setState(() { _error = duplicateError; _loading = false; });
       return;
     }
-
+ 
     // ── Fetch masterlist entry to pass to OtpScreen ───────────────────
     final entry = await AuthService.getMasterlistEntry(cleanEmail);
     if (!mounted) return;
-
+ 
     // ── Guard 3: create Supabase Auth user + send OTP ─────────────────
     final fullName = '${_firstNameCtrl.text.trim()} ${_lastNameCtrl.text.trim()}';
-
+ 
     final error = await AuthService.signUp(
       email:     cleanEmail,
       password:  _passCtrl.text,
       fullName:  fullName,
       studentId: '',
     );
-
+ 
     if (!mounted) return;
-
+ 
     if (error != null) {
       setState(() { _error = error; _loading = false; });
       return;
     }
-
+ 
     widget.onNeedsOtp(
       email:      cleanEmail,
       fullName:   fullName,
@@ -128,40 +123,32 @@ class _SignupScreenState extends State<SignupScreen> {
       yearLevel:  entry?['year_level'] as int?,
     );
   }
-
+ 
   Future<void> _handleGoogleSignup() async {
     if (_loading) return;
     setState(() { _loading = true; _error = null; });
     try {
+      // AuthService checks the masterlist and sets the role from it.
       final error = await AuthService.signInWithGoogle();
       if (!mounted) return;
-
+ 
       if (error != null) {
         if (error != 'Google sign-in cancelled.') setState(() => _error = error);
         return;
       }
-
-      final userId = Supabase.instance.client.auth.currentUser?.id;
-      if (userId != null) {
-        await Supabase.instance.client.from('profiles').upsert({
-          'id':         userId,
-          'role':       'guest',
-          'updated_at': DateTime.now().toIso8601String(),
-        }, onConflict: 'id');
-      }
-
+ 
       (widget.onGuestSignup ?? widget.onGoLogin)();
     } finally {
       if (mounted) setState(() => _loading = false);
     }
   }
-
+ 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       backgroundColor: AppColors.background,
       body: Column(children: [
-
+ 
         // ── Header ────────────────────────────────────────────────────
         Container(
           width: double.infinity,
@@ -216,7 +203,7 @@ class _SignupScreenState extends State<SignupScreen> {
                     fontSize: 13)),
           ]),
         ),
-
+ 
         // ── Form ──────────────────────────────────────────────────────
         Expanded(
           child: SingleChildScrollView(
@@ -226,8 +213,8 @@ class _SignupScreenState extends State<SignupScreen> {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-
-                  // ── Google (Guest) button ───────────────────────────
+ 
+                  // ── Google button ───────────────────────────────────
                   SizedBox(
                     width: double.infinity,
                     child: OutlinedButton(
@@ -261,20 +248,6 @@ class _SignupScreenState extends State<SignupScreen> {
                                   fontSize: 15,
                                   fontWeight: FontWeight.w700,
                                   color: AppColors.textDark)),
-                          const SizedBox(width: 8),
-                          Container(
-                            padding: const EdgeInsets.symmetric(
-                                horizontal: 6, vertical: 2),
-                            decoration: BoxDecoration(
-                              color: Colors.grey.shade100,
-                              borderRadius: BorderRadius.circular(6),
-                            ),
-                            child: Text('Guest',
-                                style: GoogleFonts.nunito(
-                                    fontSize: 10,
-                                    fontWeight: FontWeight.w700,
-                                    color: AppColors.textLight)),
-                          ),
                         ],
                       ),
                     ),
@@ -282,25 +255,25 @@ class _SignupScreenState extends State<SignupScreen> {
                   const SizedBox(height: 8),
                   Center(
                     child: Text(
-                      'Google accounts are granted guest access only',
+                      'Your Google email must be in the BLOOM masterlist',
                       style: GoogleFonts.nunito(
                           fontSize: 11, color: AppColors.textLight),
                     ),
                   ),
                   const SizedBox(height: 20),
-
+ 
                   // ── Divider ─────────────────────────────────────────
                   Row(children: [
                     const Expanded(child: Divider()),
                     Padding(
                       padding: const EdgeInsets.symmetric(horizontal: 12),
-                      child: Text('or sign up with CvSU email',
+                      child: Text('or sign up with email',
                           style: GoogleFonts.nunito(
                               color: AppColors.textLight, fontSize: 13))),
                     const Expanded(child: Divider()),
                   ]),
                   const SizedBox(height: 20),
-
+ 
                   // ── Error banner ────────────────────────────────────
                   if (_error != null) ...[
                     Container(
@@ -325,7 +298,7 @@ class _SignupScreenState extends State<SignupScreen> {
                     ),
                     const SizedBox(height: 16),
                   ],
-
+ 
                   // ── Full name ────────────────────────────────────────
                   _buildLabel('FULL NAME'),
                   const SizedBox(height: 8),
@@ -348,25 +321,17 @@ class _SignupScreenState extends State<SignupScreen> {
                     ],
                   ),
                   const SizedBox(height: 16),
-
-                  // ── CvSU email ───────────────────────────────────────
-                  _buildLabel('CVSU EMAIL'),
+ 
+                  // ── Email ────────────────────────────────────────────
+                  _buildLabel('EMAIL'),
                   const SizedBox(height: 8),
                   _buildFormField(
                     ctrl:      _emailCtrl,
-                    hint:      'you@cvsu.edu.ph',
+                    hint:      'you@cvsu.edu.ph or your registered email',
                     icon:      Icons.mail_outline,
                     inputType: TextInputType.emailAddress,
                     onChanged: (_) => setState(() {}),
-                    validator: (v) {
-                      final base = AppValidators.email(v);
-                      if (base != null) return base;
-                      if (!RegExp(r'^[^@]+@cvsu\.edu\.ph$')
-                          .hasMatch((v ?? '').trim().toLowerCase())) {
-                        return 'Only @cvsu.edu.ph emails are accepted here.';
-                      }
-                      return null;
-                    },
+                    validator: AppValidators.email,
                     suffix: _isCvsuEmail
                         ? const Icon(Icons.verified_outlined,
                             color: Colors.green, size: 20)
@@ -374,12 +339,13 @@ class _SignupScreenState extends State<SignupScreen> {
                   ),
                   const SizedBox(height: 6),
                   Text(
-                    'Use your institutional CvSU email address',
+                    'CvSU members: use your @cvsu.edu.ph email. '
+                    'Other participants: use the email the GADRC added to the masterlist.',
                     style: GoogleFonts.nunito(
-                        fontSize: 11, color: AppColors.textLight),
+                        fontSize: 11, color: AppColors.textLight, height: 1.4),
                   ),
                   const SizedBox(height: 14),
-
+ 
                   // ── Password ─────────────────────────────────────────
                   _buildLabel('PASSWORD'),
                   const SizedBox(height: 8),
@@ -401,7 +367,7 @@ class _SignupScreenState extends State<SignupScreen> {
                   ),
                   _buildStrengthBar(_passCtrl.text),
                   const SizedBox(height: 16),
-
+ 
                   // ── Confirm password ─────────────────────────────────
                   _buildLabel('CONFIRM PASSWORD'),
                   const SizedBox(height: 8),
@@ -422,7 +388,7 @@ class _SignupScreenState extends State<SignupScreen> {
                           setState(() => _obscureConfirm = !_obscureConfirm)),
                   ),
                   const SizedBox(height: 20),
-
+ 
                   // ── Info note ─────────────────────────────────────────
                   Container(
                     padding: const EdgeInsets.all(14),
@@ -438,8 +404,8 @@ class _SignupScreenState extends State<SignupScreen> {
                         Expanded(
                           child: Text(
                             'A 6-digit verification code will be sent to your '
-                            '@cvsu.edu.ph email. After verifying, you\'ll be '
-                            'taken directly to the Home screen.',
+                            'email. After verifying, you\'ll be taken directly '
+                            'to the Home screen.',
                             style: GoogleFonts.nunito(
                                 fontSize: 12,
                                 color: AppColors.textMid,
@@ -447,7 +413,7 @@ class _SignupScreenState extends State<SignupScreen> {
                       ]),
                   ),
                   const SizedBox(height: 20),
-
+ 
                   // ── Create Account button ─────────────────────────────
                   SizedBox(
                     width: double.infinity,
@@ -475,7 +441,7 @@ class _SignupScreenState extends State<SignupScreen> {
                     ),
                   ),
                   const SizedBox(height: 16),
-
+ 
                   // ── Sign in link ──────────────────────────────────────
                   Center(
                     child: GestureDetector(
@@ -503,7 +469,7 @@ class _SignupScreenState extends State<SignupScreen> {
       ]),
     );
   }
-
+ 
   Widget _buildStrengthBar(String password) {
     if (password.isEmpty) return const SizedBox(height: 6);
     final score  = AppValidators.passwordStrength(password);
@@ -528,7 +494,7 @@ class _SignupScreenState extends State<SignupScreen> {
               fontSize: 11, color: color, fontWeight: FontWeight.w700)),
     ]);
   }
-
+ 
   Widget _buildFormField({
     required TextEditingController ctrl,
     required String hint,
@@ -572,7 +538,7 @@ class _SignupScreenState extends State<SignupScreen> {
       ),
     );
   }
-
+ 
   Widget _buildLabel(String text) {
     return Text(text,
         style: GoogleFonts.nunito(
