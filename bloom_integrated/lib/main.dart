@@ -7,13 +7,13 @@
 //     This covers CvSU students/staff (@cvsu.edu.ph) AND outsiders the
 //     GADRC admin added (e.g. Gmail). Anyone else is signed out.
 //   • The role always comes from the masterlist (no more "force guest").
- 
+
 import 'dart:async';
 import 'package:app_links/app_links.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
- 
+
 import 'theme/app_theme.dart';
 import 'services/auth_service.dart';
 import 'screens/login_screen.dart';
@@ -21,10 +21,10 @@ import 'screens/signup_screen.dart';
 import 'screens/otp_screen.dart';
 import 'screens/reset_password_screen.dart';
 import 'screens/main_shell.dart';
- 
+
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
- 
+
   await Supabase.initialize(
     url:     'https://vfpgzuehfebhawlidhsz.supabase.co',
     anonKey: 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InZmcGd6dWVoZmViaGF3bGlkaHN6Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzMwMjk4ODMsImV4cCI6MjA4ODYwNTg4M30.ZzaOTYxShnwwLDMNH1uZKb59lYsB6pnNk1mPik2VRR0',
@@ -32,16 +32,16 @@ Future<void> main() async {
       authFlowType: AuthFlowType.implicit,
     ),
   );
- 
+
   // NOTE: Google Sign-In is initialized inside AuthService.signInWithGoogle()
   // with the real client IDs. It must not be initialized a second time here.
- 
+
   runApp(const BloomApp());
 }
- 
+
 class BloomApp extends StatelessWidget {
   const BloomApp({super.key});
- 
+
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
@@ -55,7 +55,7 @@ class BloomApp extends StatelessWidget {
     );
   }
 }
- 
+
 // ── Auth status ───────────────────────────────────────────────────────────────
 enum _AuthStatus {
   loading,
@@ -65,7 +65,7 @@ enum _AuthStatus {
   deactivated,
   notInMasterlist,
 }
- 
+
 // ── Recovery URL detection (web only) ────────────────────────────────────────
 bool _isRecoveryUrl() {
   if (!kIsWeb) return false;
@@ -76,14 +76,14 @@ bool _isRecoveryUrl() {
   }
   return Uri.base.queryParameters['type'] == 'recovery';
 }
- 
+
 // ── AuthGate ──────────────────────────────────────────────────────────────────
 class AuthGate extends StatefulWidget {
   const AuthGate({super.key});
   @override
   State<AuthGate> createState() => _AuthGateState();
 }
- 
+
 class _AuthGateState extends State<AuthGate> {
   _AuthStatus         _status  = _AuthStatus.loading;
   StreamSubscription? _authSub;
@@ -93,16 +93,16 @@ class _AuthGateState extends State<AuthGate> {
   int                 _checkId = 0;
   String              _resolvedRole  = '';
   String              _blockedEmail  = '';
- 
+
   final _supabase = Supabase.instance.client;
- 
+
   @override
   void initState() {
     super.initState();
     _initAuth();
     _initDeepLinks();
   }
- 
+
   @override
   void dispose() {
     _authSub?.cancel();
@@ -110,7 +110,7 @@ class _AuthGateState extends State<AuthGate> {
     _stopDeactivationWatcher();
     super.dispose();
   }
- 
+
   // ── Deactivation watcher ──────────────────────────────────────────────────
   void _startDeactivationWatcher(String userId) {
     _stopDeactivationWatcher();
@@ -131,7 +131,7 @@ class _AuthGateState extends State<AuthGate> {
           },
         )
         .subscribe();
- 
+
     _pollTimer = Timer.periodic(const Duration(seconds: 30), (_) async {
       final user = _supabase.auth.currentUser;
       if (user == null) return;
@@ -145,7 +145,7 @@ class _AuthGateState extends State<AuthGate> {
       } catch (_) {}
     });
   }
- 
+
   void _stopDeactivationWatcher() {
     _pollTimer?.cancel();
     _pollTimer = null;
@@ -154,13 +154,13 @@ class _AuthGateState extends State<AuthGate> {
       _profileChannel = null;
     }
   }
- 
+
   Future<void> _handleDeactivated() async {
     _stopDeactivationWatcher();
     try { await AuthService.signOut(); } catch (_) {}
     if (mounted) setState(() => _status = _AuthStatus.deactivated);
   }
- 
+
   // ── Deep links ────────────────────────────────────────────────────────────
   void _initDeepLinks() {
     if (kIsWeb) return;
@@ -170,13 +170,13 @@ class _AuthGateState extends State<AuthGate> {
     });
     _linkSub = appLinks.uriLinkStream.listen(_handleDeepLink);
   }
- 
+
   void _handleDeepLink(Uri uri) {
     if (uri.host == 'reset-callback') {
       if (mounted) setState(() => _status = _AuthStatus.passwordRecovery);
     }
   }
- 
+
   // ── Auth init ─────────────────────────────────────────────────────────────
   Future<void> _initAuth() async {
     if (_isRecoveryUrl()) {
@@ -192,7 +192,7 @@ class _AuthGateState extends State<AuthGate> {
       if (mounted) setState(() => _status = _AuthStatus.unauthenticated);
     }
   }
- 
+
   // Runs the checks, and if anything unexpected fails, returns to the
   // login screen instead of leaving the app stuck on the loading spinner.
   Future<void> _safeResolve() async {
@@ -203,18 +203,18 @@ class _AuthGateState extends State<AuthGate> {
       if (mounted) setState(() => _status = _AuthStatus.unauthenticated);
     }
   }
- 
+
   void _subscribeToAuthEvents() {
     _authSub = _supabase.auth.onAuthStateChange.listen(
       (data) async {
         final event = data.event;
         if (event == AuthChangeEvent.tokenRefreshed) return;
- 
+
         if (event == AuthChangeEvent.passwordRecovery) {
           if (mounted) setState(() => _status = _AuthStatus.passwordRecovery);
           return;
         }
- 
+
         if (event == AuthChangeEvent.signedIn) {
           if (_isRecoveryUrl()) {
             if (mounted) setState(() => _status = _AuthStatus.passwordRecovery);
@@ -223,7 +223,7 @@ class _AuthGateState extends State<AuthGate> {
           await _safeResolve();
           return;
         }
- 
+
         if (event == AuthChangeEvent.signedOut) {
           if (_status == _AuthStatus.authenticated) {
             _stopDeactivationWatcher();
@@ -237,7 +237,7 @@ class _AuthGateState extends State<AuthGate> {
       },
     );
   }
- 
+
   // ── Resolve status (runs after EVERY sign-in and on app start) ────────────
   //
   //  1. Email must be in the masterlist (and active)  → otherwise signed out
@@ -247,14 +247,14 @@ class _AuthGateState extends State<AuthGate> {
   Future<void> _resolveAuthenticatedStatus() async {
     final myCheckId = ++_checkId;
     final user = _supabase.auth.currentUser;
- 
+
     if (user == null) {
       if (mounted) setState(() => _status = _AuthStatus.unauthenticated);
       return;
     }
- 
+
     final email = (user.email ?? '').toLowerCase().trim();
- 
+
     // ── 1. Masterlist gate (CvSU emails AND admin-added outsiders) ─────────
     bool? inMasterlist;
     try {
@@ -266,7 +266,7 @@ class _AuthGateState extends State<AuthGate> {
       inMasterlist = null; // couldn't check (offline / timeout)
     }
     if (!mounted || myCheckId != _checkId) return;
- 
+
     if (inMasterlist == false) {
       _stopDeactivationWatcher();
       try { await AuthService.signOut(); } catch (_) {}
@@ -277,7 +277,7 @@ class _AuthGateState extends State<AuthGate> {
       });
       return;
     }
- 
+
     // ── 2. Profile / deactivation check ────────────────────────────────────
     try {
       final profile = await _supabase
@@ -286,18 +286,18 @@ class _AuthGateState extends State<AuthGate> {
           .eq('id', user.id)
           .maybeSingle()
           .timeout(const Duration(seconds: 10));
- 
+
       if (!mounted || myCheckId != _checkId) return;
- 
+
       if (profile != null && profile['is_active'] == false) {
         _stopDeactivationWatcher();
         await AuthService.signOut();
         if (mounted) setState(() => _status = _AuthStatus.deactivated);
         return;
       }
- 
+
       var role = (profile?['role'] as String? ?? '').trim();
- 
+
       // Couldn't reach the masterlist check AND there's no known profile:
       // don't let an unverified account in.
       if (inMasterlist == null && role.isEmpty) {
@@ -305,13 +305,13 @@ class _AuthGateState extends State<AuthGate> {
         if (mounted) setState(() => _status = _AuthStatus.unauthenticated);
         return;
       }
- 
+
       // ── 3. Role from the masterlist if the profile doesn't have one ─────
       if (role.isEmpty) {
         role = await _recoverRoleFromMasterlist(user.id, email) ?? '';
         if (!mounted || myCheckId != _checkId) return;
       }
- 
+
       _startDeactivationWatcher(user.id);
       _resolvedRole = role.isNotEmpty ? role : 'student';
       if (mounted) setState(() => _status = _AuthStatus.authenticated);
@@ -326,23 +326,23 @@ class _AuthGateState extends State<AuthGate> {
       }
     }
   }
- 
+
   /// Copies the person's details from the masterlist into their profile.
   /// Works for CvSU emails AND admin-added outsiders. Returns the role.
   Future<String?> _recoverRoleFromMasterlist(String userId, String email) async {
     try {
       final row = await _supabase
           .from('masterlist')
-          .select('role, full_name, student_id, department, course, year_level')
+          .select('role, full_name, student_id, department, course, year_level, sex')
           .eq('cvsu_email', email)
           .eq('is_active', true)
           .maybeSingle();
- 
+
       if (row == null) return null;
- 
+
       final rawYear = row['year_level'];
       final yearIdx = rawYear is int ? rawYear : null;
- 
+
       await _supabase.from('profiles').upsert({
         'id':         userId,
         'email':      email,
@@ -352,57 +352,58 @@ class _AuthGateState extends State<AuthGate> {
         'department': row['department'],
         'course':     row['course'],
         'year_level': yearIdx,
+        if (row['sex'] == 'male' || row['sex'] == 'female') 'sex': row['sex'],
         'is_active':  true,
         'updated_at': DateTime.now().toUtc().toIso8601String(),
       }, onConflict: 'id');
- 
+
       return row['role'] as String?;
     } catch (_) {
       return null;
     }
   }
- 
+
   // ── Callbacks ─────────────────────────────────────────────────────────────
   void _handleOtpVerified() {}   // auth stream handles navigation
- 
+
   // Google sign-in finished → run the same masterlist/role checks
   void _handleGuestAuth() => _safeResolve();
- 
+
   void _handleSignOut() {
     _stopDeactivationWatcher();
     setState(() => _status = _AuthStatus.unauthenticated);
   }
   void _handleResetComplete() => setState(() => _status = _AuthStatus.unauthenticated);
- 
+
   @override
   Widget build(BuildContext context) {
     return AnimatedSwitcher(
       duration: const Duration(milliseconds: 300),
       child: switch (_status) {
- 
+
         _AuthStatus.loading =>
           const _SplashScreen(),
- 
+
         _AuthStatus.unauthenticated =>
           _AuthNavigator(
             key:           const ValueKey('authNav'),
             onGuestAuth:   _handleGuestAuth,
             onOtpVerified: _handleOtpVerified,
           ),
- 
+
         _AuthStatus.authenticated =>
           MainShell(
             key:          const ValueKey('mainShell'),
             onSignOut:    _handleSignOut,
             resolvedRole: _resolvedRole,
           ),
- 
+
         _AuthStatus.passwordRecovery =>
           ResetPasswordScreen(
             key:        const ValueKey('resetPassword'),
             onComplete: _handleResetComplete,
           ),
- 
+
         _AuthStatus.deactivated =>
           _BlockedScreen(
             key:     const ValueKey('deactivated'),
@@ -411,7 +412,7 @@ class _AuthGateState extends State<AuthGate> {
                      'Please contact your administrator for assistance.',
             onClose: () => setState(() => _status = _AuthStatus.unauthenticated),
           ),
- 
+
         _AuthStatus.notInMasterlist =>
           _BlockedScreen(
             key:     const ValueKey('notInMasterlist'),
@@ -424,7 +425,7 @@ class _AuthGateState extends State<AuthGate> {
     );
   }
 }
- 
+
 // ── Splash ────────────────────────────────────────────────────────────────────
 class _SplashScreen extends StatelessWidget {
   const _SplashScreen();
@@ -434,7 +435,7 @@ class _SplashScreen extends StatelessWidget {
     body: Center(child: CircularProgressIndicator(color: AppColors.primary)),
   );
 }
- 
+
 // ── Blocked (deactivated / not in masterlist) ─────────────────────────────────
 class _BlockedScreen extends StatelessWidget {
   final String title;
@@ -446,7 +447,7 @@ class _BlockedScreen extends StatelessWidget {
     required this.message,
     required this.onClose,
   });
- 
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -495,27 +496,27 @@ class _BlockedScreen extends StatelessWidget {
     );
   }
 }
- 
+
 // ── Auth navigator ────────────────────────────────────────────────────────────
 enum _AuthView { login, signup, signupOtp, loginOtp }
- 
+
 class _AuthNavigator extends StatefulWidget {
   final VoidCallback onGuestAuth;
   final VoidCallback onOtpVerified;
- 
+
   const _AuthNavigator({
     super.key,
     required this.onGuestAuth,
     required this.onOtpVerified,
   });
- 
+
   @override
   State<_AuthNavigator> createState() => _AuthNavigatorState();
 }
- 
+
 class _AuthNavigatorState extends State<_AuthNavigator> {
   _AuthView _view = _AuthView.login;
- 
+
   String?  _otpEmail;
   String?  _otpFullName;
   String   _otpRole       = '';
@@ -524,10 +525,10 @@ class _AuthNavigatorState extends State<_AuthNavigator> {
   String?  _otpCourse;
   int?     _otpYearLevel;
   String?  _loginOtpEmail;
- 
+
   void _goToLogin()  => setState(() => _view = _AuthView.login);
   void _goToSignup() => setState(() => _view = _AuthView.signup);
- 
+
   void _goToSignupOtp({
     required String  email,
     required String  fullName,
@@ -548,27 +549,27 @@ class _AuthNavigatorState extends State<_AuthNavigator> {
       _view          = _AuthView.signupOtp;
     });
   }
- 
+
   void _goToLoginOtp({ required String email }) {
     setState(() {
       _loginOtpEmail = email;
       _view          = _AuthView.loginOtp;
     });
   }
- 
+
   @override
   Widget build(BuildContext context) {
     return AnimatedSwitcher(
       duration: const Duration(milliseconds: 250),
       child: switch (_view) {
- 
+
         _AuthView.login => LoginScreen(
           key:          const ValueKey('login'),
           onLogin:      (String email) => _goToLoginOtp(email: email),
           onGuestLogin: widget.onGuestAuth,
           onGoSignup:   _goToSignup,
         ),
- 
+
         _AuthView.signup => SignupScreen(
           key:           const ValueKey('signup'),
           onGoLogin:     _goToLogin,
@@ -591,7 +592,7 @@ class _AuthNavigatorState extends State<_AuthNavigator> {
           ),
           onGuestSignup: widget.onGuestAuth,
         ),
- 
+
         _AuthView.signupOtp => OtpScreen(
           key:        const ValueKey('signupOtp'),
           email:      _otpEmail!,
@@ -604,7 +605,7 @@ class _AuthNavigatorState extends State<_AuthNavigator> {
           onVerified: widget.onOtpVerified,
           onBack:     _goToSignup,
         ),
- 
+
         _AuthView.loginOtp => OtpScreen(
           key:        const ValueKey('loginOtp'),
           email:      _loginOtpEmail!,
