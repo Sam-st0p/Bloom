@@ -10,6 +10,7 @@ import '../models/models.dart';
 import '../widgets/common_widgets.dart';
 import '../services/activity_service.dart';
 import 'assessment_screen.dart';
+import '../services/badge_service.dart';
 
 final _supabase = Supabase.instance.client;
 
@@ -275,10 +276,11 @@ class _LibraryScreenState extends State<LibraryScreen> {
     );
 
     try {
-      final files = await _supabase
+        final files = await _supabase
           .from('module_files')
           .select('*')
           .eq('module_id', module.id)
+          .neq('file_url', '__content__') // hide the Content Creator's auto-save record
           .order('sort_order');
       if (mounted) {
         setState(() {
@@ -349,6 +351,16 @@ class _LibraryScreenState extends State<LibraryScreen> {
         'status':           pct == 100 ? 'completed' : 'in_progress',
         'last_accessed_at': DateTime.now().toIso8601String(),
       }, onConflict: 'user_id,module_id');
+      if (pct == 100) {
+        final unlocked = await BadgeService.checkAndAward();
+        if (unlocked.isNotEmpty && mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+            content: Text('🏅 Badge unlocked: ${unlocked.join(', ')}'),
+            backgroundColor: AppColors.primary,
+            behavior: SnackBarBehavior.floating,
+          ));
+        }
+      }
       await _load();
       await _loadStats();
     } catch (_) {}

@@ -4,13 +4,17 @@ import 'package:google_fonts/google_fonts.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import '../theme/app_theme.dart';
 import '../widgets/common_widgets.dart';
+import '../services/badge_service.dart';
+
 
 final _supabase = Supabase.instance.client;
+
 
 class AssessmentScreen extends StatefulWidget {
   final String moduleId;
   final String moduleTitle;
   final VoidCallback onComplete;
+
 
   const AssessmentScreen({
     super.key,
@@ -19,9 +23,11 @@ class AssessmentScreen extends StatefulWidget {
     required this.onComplete,
   });
 
+
   @override
   State<AssessmentScreen> createState() => _AssessmentScreenState();
 }
+
 
 class _AssessmentScreenState extends State<AssessmentScreen> {
   Map<String, dynamic>? _assessment;
@@ -30,18 +36,22 @@ class _AssessmentScreenState extends State<AssessmentScreen> {
   bool _submitting = false;
   bool _done = false;
 
+
   // Current question index
   int _currentQ = 0;
+
 
   // Selected answers: questionId -> optionId (or text for short answer)
   final Map<String, String> _answers = {};
   // Text controllers for short answer questions — persists text across navigation
   final Map<String, TextEditingController> _textControllers = {};
 
+
   // Timer
   Timer?  _timer;
   int     _secondsLeft = 0;
   bool    _timerStarted = false;
+
 
   // Results
   double _score = 0;
@@ -49,11 +59,13 @@ class _AssessmentScreenState extends State<AssessmentScreen> {
   bool _passed = false;
   int? _previousAttempts;
 
+
   @override
   void initState() {
     super.initState();
     _load();
   }
+
 
   @override
   void dispose() {
@@ -61,6 +73,7 @@ class _AssessmentScreenState extends State<AssessmentScreen> {
     for (final c in _textControllers.values) { c.dispose(); }
     super.dispose();
   }
+
 
   Future<void> _load() async {
     setState(() => _loading = true);
@@ -73,12 +86,15 @@ class _AssessmentScreenState extends State<AssessmentScreen> {
           .eq('is_published', true)
           .limit(1);
 
+
       if ((assessments as List).isEmpty) {
         if (mounted) setState(() { _loading = false; _assessment = null; });
         return;
       }
 
+
       final assessment = assessments.first;
+
 
       // Get questions with options
       final questions = await _supabase
@@ -86,6 +102,7 @@ class _AssessmentScreenState extends State<AssessmentScreen> {
           .select('*, question_options(*)')
           .eq('assessment_id', assessment['id'])
           .order('sort_order');
+
 
       // Check previous attempts
       final userId = _supabase.auth.currentUser?.id;
@@ -99,6 +116,7 @@ class _AssessmentScreenState extends State<AssessmentScreen> {
         prevAttempts = (attempts as List).length;
       }
 
+
       if (mounted) {
         setState(() {
           _assessment = assessment;
@@ -106,7 +124,9 @@ class _AssessmentScreenState extends State<AssessmentScreen> {
           _previousAttempts = prevAttempts;
           _loading = false;
         });
-        final timeLimitMins = assessment['time_limit'] as int?;
+        // FIX: the admin panel saves the limit as "time_limit_minutes"
+        final timeLimitMins =
+            (assessment['time_limit_minutes'] ?? assessment['time_limit']) as int?;
         if (timeLimitMins != null && timeLimitMins > 0) {
           _startTimer(timeLimitMins * 60);
         }
@@ -115,6 +135,8 @@ class _AssessmentScreenState extends State<AssessmentScreen> {
       if (mounted) setState(() => _loading = false);
     }
   }
+
+
 
 
   // Deep-cast helper — fixes nested question_options not showing
@@ -132,6 +154,7 @@ class _AssessmentScreenState extends State<AssessmentScreen> {
       return qMap;
     }).toList();
   }
+
 
   void _startTimer(int totalSeconds) {
     _timer?.cancel();
@@ -157,11 +180,13 @@ class _AssessmentScreenState extends State<AssessmentScreen> {
     });
   }
 
+
   String _formatTime(int seconds) {
     final m = (seconds ~/ 60).toString().padLeft(2, '0');
     final s = (seconds % 60).toString().padLeft(2, '0');
     return '$m:$s';
   }
+
 
   Future<void> _submitAssessment() async {
     _timer?.cancel();
@@ -170,41 +195,49 @@ class _AssessmentScreenState extends State<AssessmentScreen> {
       final userId = _supabase.auth.currentUser?.id;
       if (userId == null) return;
 
+
       // Calculate score
       double score = 0;
       double maxScore = 0;
+
 
       for (final q in _questions) {
         final pts = (q['points'] as num?)?.toDouble() ?? 1.0;
         final qType = (q['question_type'] ?? 'multiple_choice').toString().toLowerCase();
         final isShortAnswer = qType == 'short_answer' || qType == 'essay';
 
+
         // Short answer questions are manually graded — exclude from auto-score
         if (isShortAnswer) continue;
+
 
         maxScore += pts;
         final selectedOptionId = _answers[q['id'].toString()];
         if (selectedOptionId != null) {
           final options = q['question_options'] as List? ?? [];
-final selected = options.firstWhere(
-  (o) => o['id'].toString() == selectedOptionId,
-  orElse: () => <String, dynamic>{},
-);
-if (selected['is_correct'] == true) {
+          final selected = options.firstWhere(
+            (o) => o['id'].toString() == selectedOptionId,
+            orElse: () => <String, dynamic>{},
+          );
+          if (selected['is_correct'] == true) {
             score += pts;
           }
         }
       }
 
+
       final passingScore = (_assessment?['passing_score'] as num?)?.toDouble() ?? 75.0;
       final passed = maxScore > 0 ? (score / maxScore * 100) >= passingScore : false;
+      // FIX: save the score as a PERCENTAGE (e.g. 80), not the raw points (e.g. 4)
+      final scorePercent = maxScore > 0 ? (score / maxScore * 100).round() : 0;
+
 
       // Save attempt
       final attempt = await _supabase.from('assessment_attempts').insert({
         'user_id': userId,
         'assessment_id': _assessment!['id'],
         'attempt_number': (_previousAttempts ?? 0) + 1,
-        'score': score,
+        'score': scorePercent,
         'max_score': maxScore,
         'passed': passed,
         'started_at': DateTime.now().toIso8601String(),
@@ -212,14 +245,17 @@ if (selected['is_correct'] == true) {
         'status': 'submitted',
       }).select().single();
 
+
       // Save individual answers
       for (final q in _questions) {
         final qId = q['id'].toString();
         final answer = _answers[qId];
         if (answer == null) continue;
 
+
         final qType = (q['question_type'] ?? 'multiple_choice').toString().toLowerCase();
         final isShortAnswer = qType == 'short_answer' || qType == 'essay';
+
 
         if (isShortAnswer) {
           // Save short answer text — manually graded by admin
@@ -233,11 +269,12 @@ if (selected['is_correct'] == true) {
         } else {
           final options = q['question_options'] as List? ?? [];
           final selected = options.firstWhere(
-  (o) => o['id'].toString() == answer,
-  orElse: () => <String, dynamic>{},
-);
-final isCorrect = selected['is_correct'] == true;
+            (o) => o['id'].toString() == answer,
+            orElse: () => <String, dynamic>{},
+          );
+          final isCorrect = selected['is_correct'] == true;
           final pts = (q['points'] as num?)?.toDouble() ?? 1.0;
+
 
           await _supabase.from('assessment_answers').insert({
             'attempt_id': attempt['id'],
@@ -249,6 +286,7 @@ final isCorrect = selected['is_correct'] == true;
         }
       }
 
+
       // If passed, update module progress to 100%
       if (passed) {
         await _supabase.from('module_progress').upsert({
@@ -259,9 +297,11 @@ final isCorrect = selected['is_correct'] == true;
           'last_accessed_at': DateTime.now().toIso8601String(),
         }, onConflict: 'user_id,module_id');
 
+
         // Check and award badges
         await _checkAndAwardBadges(userId);
       }
+
 
       if (mounted) {
         setState(() {
@@ -272,56 +312,25 @@ final isCorrect = selected['is_correct'] == true;
           _submitting = false;
         });
       }
-} catch (e) {
-  debugPrint('❌ Submit error: $e');
-  if (mounted) setState(() => _submitting = false);
-}
+    } catch (e) {
+      debugPrint('❌ Submit error: $e');
+      if (mounted) setState(() => _submitting = false);
+    }
   }
+
 
   Future<void> _checkAndAwardBadges(String userId) async {
-    try {
-      // Get all badge criteria
-      final criteria = await _supabase.from('badge_criteria').select('*');
-
-      // Get user's completed modules count
-      final completed = await _supabase
-          .from('module_progress')
-          .select('id')
-          .eq('user_id', userId)
-          .eq('status', 'completed');
-      final completedCount = (completed as List).length;
-
-      // Get already earned badges
-      final earned = await _supabase
-          .from('student_badges')
-          .select('badge_id')
-          .eq('user_id', userId);
-      final earnedIds = Set<String>.from(
-          (earned as List).map((e) => e['badge_id'].toString()));
-
-      for (final criterion in criteria as List) {
-        final badgeId = criterion['badge_id'].toString();
-        if (earnedIds.contains(badgeId)) continue;
-
-        final type = criterion['criteria_type'] as String? ?? '';
-        final threshold = criterion['threshold_value'] as int? ?? 1;
-
-        bool shouldAward = false;
-
-        if (type == 'modules_completed' && completedCount >= threshold) {
-          shouldAward = true;
-        }
-
-        if (shouldAward) {
-          await _supabase.from('student_badges').insert({
-            'user_id': userId,
-            'badge_id': badgeId,
-            'awarded_at': DateTime.now().toIso8601String(),
-          });
-        }
-      }
-    } catch (_) {}
+    // Shared logic lives in BadgeService so Library/Achievements use the same rules.
+    final unlocked = await BadgeService.checkAndAward();
+    if (unlocked.isNotEmpty && mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Text('🏅 Badge unlocked: ${unlocked.join(', ')}'),
+        backgroundColor: AppColors.primary,
+        behavior: SnackBarBehavior.floating,
+      ));
+    }
   }
+
 
   @override
   Widget build(BuildContext context) {
@@ -331,6 +340,7 @@ final isCorrect = selected['is_correct'] == true;
         body: const Center(child: CircularProgressIndicator(color: AppColors.primary)),
       );
     }
+
 
     if (_assessment == null) {
       return Scaffold(
@@ -367,6 +377,7 @@ final isCorrect = selected['is_correct'] == true;
       );
     }
 
+
     if (_done) return _buildResults();
     if (_questions.isEmpty) {
       return Scaffold(
@@ -382,6 +393,7 @@ final isCorrect = selected['is_correct'] == true;
       );
     }
 
+
     return Scaffold(
       backgroundColor: AppColors.background,
       body: Column(
@@ -394,6 +406,7 @@ final isCorrect = selected['is_correct'] == true;
       ),
     );
   }
+
 
   Widget _buildHeader() {
     return Container(
@@ -432,27 +445,29 @@ final isCorrect = selected['is_correct'] == true;
                       fontWeight: FontWeight.w800,
                       color: AppColors.primary)),
             ),
-            if (_timerStarted) ...[const SizedBox(width: 6),
-              Container(
-                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-                decoration: BoxDecoration(
-                  color: (_secondsLeft <= 60 ? const Color(0xFFDC2626) : AppColors.primary).withValues(alpha: 0.1),
-                  borderRadius: BorderRadius.circular(20),
-                ),
-                child: Row(mainAxisSize: MainAxisSize.min, children: [
-                  Icon(Icons.timer_outlined, size: 13,
-                      color: _secondsLeft <= 60 ? const Color(0xFFDC2626) : AppColors.primary),
-                  const SizedBox(width: 4),
-                  Text(_formatTime(_secondsLeft),
-                      style: GoogleFonts.nunito(fontSize: 12, fontWeight: FontWeight.w800,
-                          color: _secondsLeft <= 60 ? const Color(0xFFDC2626) : AppColors.primary)),
-                ]),
+          if (_timerStarted && !_done) ...[
+            const SizedBox(width: 6),
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+              decoration: BoxDecoration(
+                color: (_secondsLeft <= 60 ? const Color(0xFFDC2626) : AppColors.primary).withValues(alpha: 0.1),
+                borderRadius: BorderRadius.circular(20),
               ),
-            ],
+              child: Row(mainAxisSize: MainAxisSize.min, children: [
+                Icon(Icons.timer_outlined, size: 13,
+                    color: _secondsLeft <= 60 ? const Color(0xFFDC2626) : AppColors.primary),
+                const SizedBox(width: 4),
+                Text(_formatTime(_secondsLeft),
+                    style: GoogleFonts.nunito(fontSize: 12, fontWeight: FontWeight.w800,
+                        color: _secondsLeft <= 60 ? const Color(0xFFDC2626) : AppColors.primary)),
+              ]),
+            ),
+          ],
         ],
       ),
     );
   }
+
 
   Widget _buildProgressBar() {
     final progress = _questions.isEmpty ? 0.0 : (_currentQ + 1) / _questions.length;
@@ -464,15 +479,19 @@ final isCorrect = selected['is_correct'] == true;
     );
   }
 
+
   Widget _buildQuestion() {
     final q = _questions[_currentQ];
     final qType = (q['question_type'] ?? 'multiple_choice').toString().toLowerCase();
     final isShortAnswer = qType == 'short_answer' || qType == 'essay';
 
+
     final options = List<Map<String, dynamic>>.from(q['question_options'] as List? ?? []);
     options.sort((a, b) => (a['sort_order'] as int? ?? 0).compareTo(b['sort_order'] as int? ?? 0));
 
+
     final selectedOptionId = _answers[q['id'].toString()];
+
 
     return SingleChildScrollView(
       padding: const EdgeInsets.all(20),
@@ -517,6 +536,7 @@ final isCorrect = selected['is_correct'] == true;
           Text('${(q['points'] as num?) ?? 1} point${((q['points'] as num?) ?? 1) == 1 ? '' : 's'}',
               style: GoogleFonts.nunito(fontSize: 12, color: AppColors.textLight)),
           const SizedBox(height: 20),
+
 
           // ── Short answer ──────────────────────────────────────────
           if (isShortAnswer) ...[
@@ -575,6 +595,7 @@ final isCorrect = selected['is_correct'] == true;
               );
             }),
           ]
+
 
           // ── Multiple choice / True-False ──────────────────────────
           else if (options.isEmpty) ...[
@@ -643,11 +664,13 @@ final isCorrect = selected['is_correct'] == true;
     );
   }
 
+
   Future<void> _confirmSubmit() async {
     // Count unanswered questions
     final unanswered = _questions
         .where((q) => !_answers.containsKey(q['id'].toString()))
         .length;
+
 
     if (unanswered > 0) {
       final confirm = await showDialog<bool>(
@@ -678,8 +701,10 @@ final isCorrect = selected['is_correct'] == true;
       if (confirm != true) return;
     }
 
+
     _submitAssessment();
   }
+
 
   Widget _buildNavButtons() {
     final isLast = _currentQ == _questions.length - 1;
@@ -687,8 +712,10 @@ final isCorrect = selected['is_correct'] == true;
     final qType = (_questions[_currentQ]['question_type'] ?? 'multiple_choice').toString().toLowerCase();
     final isShortAnswer = qType == 'short_answer' || qType == 'essay';
 
+
     // Short answer questions are optional — don't block navigation
     final canProceed = hasAnswer || isShortAnswer;
+
 
     return Container(
       padding: const EdgeInsets.all(16),
@@ -742,9 +769,11 @@ final isCorrect = selected['is_correct'] == true;
     );
   }
 
+
   Widget _buildResults() {
     final pct = _maxScore > 0 ? (_score / _maxScore * 100).round() : 0;
     final passing = (_assessment?['passing_score'] as num?)?.toInt() ?? 75;
+
 
     return Scaffold(
       backgroundColor: AppColors.background,
@@ -895,6 +924,7 @@ final isCorrect = selected['is_correct'] == true;
     );
   }
 }
+
 
 class _ResultStat extends StatelessWidget {
   final String label, value;

@@ -33,6 +33,7 @@ import 'package:share_plus/share_plus.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:gal/gal.dart';
 import '../theme/app_theme.dart';
+import '../services/badge_service.dart';
 
 final _db = Supabase.instance.client;
 
@@ -61,6 +62,7 @@ class _BadgesScreenState extends State<BadgesScreen> {
   List<Map<String, dynamic>> _certificates = [];
   String _fullName = '';
   bool _loading = true;
+  String? _error;
   late int _tab = widget.initialTab;
 
   @override
@@ -69,45 +71,127 @@ class _BadgesScreenState extends State<BadgesScreen> {
     _load();
   }
 
+  // MainShell re-uses this State when it only changes `initialTab`
+  // (e.g. tapping a certificate notification while already on this tab).
+  @override
+  void didUpdateWidget(covariant BadgesScreen oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.initialTab != widget.initialTab) {
+      setState(() => _tab = widget.initialTab);
+    }
+  }
+
+  /// Runs one query and returns [fallback] if it fails, so one broken
+  /// query (missing column, RLS) no longer leaves the whole screen
+  /// spinning forever.
+  Future<T> _safe<T>(String label, Future<T> Function() run, T fallback,
+      List<String> errors) async {
+    try {
+      return await run();
+    } catch (e) {
+      debugPrint('[BadgesScreen] $label failed: $e');
+      errors.add(label);
+      return fallback;
+    }
+  }
+
   Future<void> _load() async {
-    setState(() => _loading = true);
+    if (!mounted) return;
+    setState(() {
+      _loading = true;
+      _error = null;
+    });
     final uid = _db.auth.currentUser?.id;
     if (uid == null) {
-      setState(() => _loading = false);
+      if (mounted) {
+        setState(() {
+          _loading = false;
+          _error = 'Please sign in to see your achievements.';
+        });
+      }
       return;
     }
-    final results = await Future.wait([
-      _db
+
+    // Catch-up: award any badges the user already qualifies for.
+    final unlocked = await BadgeService.checkAndAward();
+
+    final errors = <String>[];
+    final results = await Future.wait<dynamic>([
+      _safe<dynamic>('earned badges', () => _db
           .from('student_badges')
-          .select('*, badges(id, name, description, icon_url, badge_type)')
+          .select('*, badges(*)')
           .eq('user_id', uid)
-          .order('awarded_at', ascending: false),
-      _db.from('badges').select('*').order('name'),
-      _db
+          .order('awarded_at', ascending: false), const [], errors),
+      _safe<dynamic>('badge list',
+          () => _db.from('badges').select('*').order('name'), const [], errors),
+      _safe<dynamic>('certificates', () => _db
           .from('certificates')
-          .select(
-              'id, user_id, certificate_code, reference_type, issued_at, is_revoked, body_text, sig1_name, sig1_title, sig2_name, sig2_title, theme_color')
+          .select('*')
           .eq('user_id', uid)
           .eq('is_revoked', false)
-          .order('issued_at', ascending: false),
-      _db.from('profiles').select('full_name').eq('id', uid).maybeSingle(),
+          .order('issued_at', ascending: false), const [], errors),
+      _safe<dynamic>('profile',
+          () => _db.from('profiles').select('full_name').eq('id', uid).maybeSingle(),
+          null, errors),
     ]);
+
+    if (!mounted) return;
     setState(() {
       _earnedBadges = List<Map<String, dynamic>>.from(results[0] as List);
       _allBadges = List<Map<String, dynamic>>.from(results[1] as List);
       _certificates = List<Map<String, dynamic>>.from(results[2] as List);
       _fullName =
           (results[3] as Map<String, dynamic>?)?['full_name'] as String? ?? '';
+      _error = errors.length >= 3
+          ? "Couldn't load achievements. Check your connection and pull down to retry."
+          : null;
       _loading = false;
     });
+
+    if (unlocked.isNotEmpty && mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Text('🏅 Badge unlocked: ${unlocked.join(', ')}',
+            style: GoogleFonts.nunito(fontSize: 13, color: Colors.white)),
+        backgroundColor: AppColors.primary,
+        behavior: SnackBarBehavior.floating,
+      ));
+    }
+  }
+
+  /// The badge row for an earned student_badges entry. Falls back to the
+  /// full badge list if the embedded join came back empty.
+  Map<String, dynamic> _badgeOf(Map<String, dynamic> sb) {
+    final embedded = sb['badges'];
+    if (embedded is Map<String, dynamic> && embedded.isNotEmpty) return embedded;
+    final id = sb['badge_id']?.toString();
+    return _allBadges.firstWhere((b) => b['id']?.toString() == id,
+        orElse: () => <String, dynamic>{});
+  }
+
+  void _openBadge(Map<String, dynamic> badge,
+      {required bool earned, String? awardedAt}) {
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: Colors.transparent,
+      isScrollControlled: true,
+      builder: (_) => _BadgeDetailSheet(
+        badge: badge,
+        earned: earned,
+        awardedAt: awardedAt,
+      ),
+    );
   }
 
   Set<String> get _earnedIds => _earnedBadges
-      .map((b) => b['badge_id'] as String? ?? b['badges']?['id'] as String? ?? '')
+      .map((b) => (b['badge_id'] ?? _badgeOf(b)['id'])?.toString() ?? '')
       .toSet();
 
-  List<Map<String, dynamic>> get _lockedBadges =>
-      _allBadges.where((b) => !_earnedIds.contains(b['id'] as String? ?? '')).toList();
+  List<Map<String, dynamic>> get _lockedBadges {
+    final ids = _earnedIds;
+    return _allBadges
+        .where((b) => !ids.contains(b['id']?.toString() ?? ''))
+        .toList();
+  }
 
   int get _total => _allBadges.isEmpty ? _earnedBadges.length : _allBadges.length;
 
@@ -128,7 +212,22 @@ class _BadgesScreenState extends State<BadgesScreen> {
                 : RefreshIndicator(
                     color: AppColors.primary,
                     onRefresh: _load,
-                    child: _tab == 0 ? _badgesTab() : _certsTab(),
+                    child: _error != null
+                        ? ListView(children: [
+                            _EmptyState(
+                              icon: Icons.cloud_off_rounded,
+                              title: 'Something went wrong',
+                              sub: _error!,
+                            ),
+                            Center(
+                              child: TextButton.icon(
+                                onPressed: _load,
+                                icon: const Icon(Icons.refresh_rounded),
+                                label: const Text('Try again'),
+                              ),
+                            ),
+                          ])
+                        : (_tab == 0 ? _badgesTab() : _certsTab()),
                   ),
           ),
         ],
@@ -295,11 +394,13 @@ class _BadgesScreenState extends State<BadgesScreen> {
   // ---- Badges tab -----------------------------------------------------------
   Widget _badgesTab() {
     if (_earnedBadges.isEmpty && _allBadges.isEmpty) {
-      return const _EmptyState(
-        icon: Icons.military_tech_outlined,
-        title: 'No achievements yet',
-        sub: 'Complete assessments and modules to earn achievements',
-      );
+      return ListView(children: const [
+        _EmptyState(
+          icon: Icons.military_tech_outlined,
+          title: 'No achievements yet',
+          sub: 'Complete assessments and modules to earn achievements',
+        ),
+      ]);
     }
 
     final locked = _lockedBadges;
@@ -309,10 +410,12 @@ class _BadgesScreenState extends State<BadgesScreen> {
     final next = locked.isNotEmpty ? locked.first : null;
 
     return ListView(
+      physics: const AlwaysScrollableScrollPhysics(),
       padding: const EdgeInsets.all(16),
       children: [
         if (next != null) ...[
           _NextBadgeCard(
+            onTap: () => _openBadge(next, earned: false),
             name: next['name'] as String? ?? 'Badge',
             hint: (next['description'] as String?)?.trim().isNotEmpty == true
                 ? next['description'] as String
@@ -325,12 +428,14 @@ class _BadgesScreenState extends State<BadgesScreen> {
               'Earned (${_earnedBadges.length})', AppColors.primaryDark),
           const SizedBox(height: 10),
           _grid(_earnedBadges.map((sb) {
-            final b = sb['badges'] as Map<String, dynamic>? ?? {};
+            final b = _badgeOf(sb);
             return _BadgeTile(
               name: b['name'] as String? ?? 'Badge',
               iconUrl: b['icon_url'] as String?,
               earned: true,
-              awardedAt: sb['awarded_at'] as String?,
+              awardedAt: sb['awarded_at']?.toString(),
+              onTap: () => _openBadge(b,
+                  earned: true, awardedAt: sb['awarded_at']?.toString()),
             );
           }).toList()),
         ],
@@ -345,6 +450,7 @@ class _BadgesScreenState extends State<BadgesScreen> {
               iconUrl: b['icon_url'] as String?,
               earned: false,
               description: b['description'] as String?,
+              onTap: () => _openBadge(b, earned: false),
             );
           }).toList()),
         ],
@@ -416,11 +522,15 @@ class _BadgesScreenState extends State<BadgesScreen> {
 class _NextBadgeCard extends StatelessWidget {
   final String name;
   final String hint;
-  const _NextBadgeCard({required this.name, required this.hint});
+  final VoidCallback? onTap;
+  const _NextBadgeCard({required this.name, required this.hint, this.onTap});
 
   @override
   Widget build(BuildContext context) {
-    return Container(
+    return GestureDetector(
+      onTap: onTap,
+      behavior: HitTestBehavior.opaque,
+      child: Container(
       padding: const EdgeInsets.all(14),
       decoration: BoxDecoration(
         color: Colors.white,
@@ -478,8 +588,10 @@ class _NextBadgeCard extends StatelessWidget {
               ],
             ),
           ),
+          const Icon(Icons.chevron_right_rounded, color: AppColors.textLight),
         ],
       ),
+    ),
     );
   }
 }
@@ -494,17 +606,24 @@ class _BadgeTile extends StatelessWidget {
   final bool earned;
   final String? awardedAt;
   final String? description;
+  final VoidCallback? onTap;
   const _BadgeTile({
     required this.name,
     this.iconUrl,
     required this.earned,
     this.awardedAt,
     this.description,
+    this.onTap,
   });
 
   @override
   Widget build(BuildContext context) {
-    return Container(
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(14),
+        child: Container(
       padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 10),
       decoration: BoxDecoration(
         color: earned ? Colors.white : const Color(0xFFFBFCFB),
@@ -538,7 +657,7 @@ class _BadgeTile extends StatelessWidget {
                   borderRadius: BorderRadius.circular(13),
                 ),
                 child: Center(
-                  child: iconUrl != null
+                  child: (iconUrl ?? '').isNotEmpty
                       ? Image.network(iconUrl!,
                           width: 26,
                           height: 26,
@@ -606,6 +725,8 @@ class _BadgeTile extends StatelessWidget {
                     fontWeight: FontWeight.w500,
                     color: AppColors.textLight)),
         ],
+      ),
+    ),
       ),
     );
   }
@@ -1229,6 +1350,199 @@ class CertSignatureBlock extends StatelessWidget {
           style: GoogleFonts.nunito(fontSize: 6, color: Colors.grey),
           textAlign: TextAlign.center, overflow: TextOverflow.ellipsis),
     ]);
+}
+
+// ─────────────────────────────────────────────────────────────────
+//  BADGE DETAIL SHEET — opens when a badge tile is tapped. Earned badges
+//  show the award date; locked badges show the real requirement(s) from
+//  `badge_criteria` with the student's actual progress.
+// ─────────────────────────────────────────────────────────────────
+class _BadgeDetailSheet extends StatefulWidget {
+  final Map<String, dynamic> badge;
+  final bool earned;
+  final String? awardedAt;
+  const _BadgeDetailSheet({
+    required this.badge,
+    required this.earned,
+    this.awardedAt,
+  });
+
+  @override
+  State<_BadgeDetailSheet> createState() => _BadgeDetailSheetState();
+}
+
+class _BadgeDetailSheetState extends State<_BadgeDetailSheet> {
+  List<BadgeRequirement>? _reqs;
+
+  @override
+  void initState() {
+    super.initState();
+    final id = widget.badge['id']?.toString();
+    if (!widget.earned && id != null) {
+      BadgeService.requirementsFor(id).then((r) {
+        if (mounted) setState(() => _reqs = r);
+      });
+    } else {
+      _reqs = const [];
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final name = widget.badge['name'] as String? ?? 'Badge';
+    final desc = (widget.badge['description'] as String? ?? '').trim();
+    final iconUrl = widget.badge['icon_url'] as String?;
+    final earned = widget.earned;
+
+    final fallbackIcon = Icon(
+      earned ? Icons.emoji_events_rounded : Icons.lock_rounded,
+      size: 40,
+      color: earned ? const Color(0xFFF59E0B) : AppColors.textLight,
+    );
+
+    return Container(
+      decoration: const BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+      ),
+      padding: EdgeInsets.fromLTRB(
+          24, 12, 24, 24 + MediaQuery.of(context).viewPadding.bottom),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Container(
+            width: 40,
+            height: 4,
+            decoration: BoxDecoration(
+                color: Colors.grey[300], borderRadius: BorderRadius.circular(2)),
+          ),
+          const SizedBox(height: 20),
+          Container(
+            width: 84,
+            height: 84,
+            decoration: BoxDecoration(
+              gradient: earned
+                  ? const LinearGradient(
+                      begin: Alignment.topLeft,
+                      end: Alignment.bottomRight,
+                      colors: [Color(0xFFFEF9C3), Color(0xFFFDE68A)])
+                  : null,
+              color: earned ? null : const Color(0xFFF3F4F6),
+              borderRadius: BorderRadius.circular(22),
+              border: Border.all(
+                  color: earned ? const Color(0xFFFDE047) : AppColors.border,
+                  width: 2),
+            ),
+            child: Center(
+              child: (iconUrl ?? '').isNotEmpty
+                  ? Opacity(
+                      opacity: earned ? 1 : 0.45,
+                      child: Image.network(iconUrl!,
+                          width: 50,
+                          height: 50,
+                          fit: BoxFit.contain,
+                          errorBuilder: (_, __, ___) => fallbackIcon),
+                    )
+                  : fallbackIcon,
+            ),
+          ),
+          const SizedBox(height: 14),
+          Text(name,
+              textAlign: TextAlign.center,
+              style: GoogleFonts.nunito(
+                  fontSize: 20,
+                  fontWeight: FontWeight.w900,
+                  color: AppColors.textDark)),
+          if (desc.isNotEmpty) ...[
+            const SizedBox(height: 6),
+            Text(desc,
+                textAlign: TextAlign.center,
+                style: GoogleFonts.nunito(
+                    fontSize: 13, color: AppColors.textMid, height: 1.4)),
+          ],
+          const SizedBox(height: 16),
+          if (earned)
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+              decoration: BoxDecoration(
+                  color: const Color(0xFFE8F5E9),
+                  borderRadius: BorderRadius.circular(10)),
+              child: Row(mainAxisSize: MainAxisSize.min, children: [
+                const Icon(Icons.check_circle_rounded,
+                    size: 16, color: AppColors.primary),
+                const SizedBox(width: 6),
+                Text('Earned on ${_fmtDate(widget.awardedAt)}',
+                    style: GoogleFonts.nunito(
+                        fontSize: 12,
+                        fontWeight: FontWeight.w800,
+                        color: AppColors.primaryDark)),
+              ]),
+            )
+          else
+            _requirements(),
+        ],
+      ),
+    );
+  }
+
+  Widget _requirements() {
+    if (_reqs == null) {
+      return const Padding(
+        padding: EdgeInsets.all(12),
+        child: SizedBox(
+            width: 22,
+            height: 22,
+            child: CircularProgressIndicator(
+                strokeWidth: 2, color: AppColors.primary)),
+      );
+    }
+    if (_reqs!.isEmpty) {
+      return Text('Keep learning to unlock this badge.',
+          style: GoogleFonts.nunito(fontSize: 12, color: AppColors.textLight));
+    }
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text('HOW TO UNLOCK',
+            style: GoogleFonts.nunito(
+                fontSize: 10,
+                fontWeight: FontWeight.w800,
+                letterSpacing: 0.5,
+                color: AppColors.info)),
+        const SizedBox(height: 8),
+        for (final r in _reqs!) ...[
+          Row(children: [
+            Expanded(
+              child: Text(r.label,
+                  style: GoogleFonts.nunito(
+                      fontSize: 13,
+                      fontWeight: FontWeight.w700,
+                      color: AppColors.textDark)),
+            ),
+            if (r.current != null)
+              Text('${r.current!.clamp(0, r.threshold)} / ${r.threshold}',
+                  style: GoogleFonts.nunito(
+                      fontSize: 12,
+                      fontWeight: FontWeight.w800,
+                      color: AppColors.primary)),
+          ]),
+          if (r.current != null) ...[
+            const SizedBox(height: 6),
+            ClipRRect(
+              borderRadius: BorderRadius.circular(6),
+              child: LinearProgressIndicator(
+                value: r.progress,
+                minHeight: 8,
+                backgroundColor: const Color(0xFFEFF3EC),
+                color: AppColors.primary,
+              ),
+            ),
+          ],
+          const SizedBox(height: 12),
+        ],
+      ],
+    );
+  }
 }
 
 // ─────────────────────────────────────────────────────────────────
