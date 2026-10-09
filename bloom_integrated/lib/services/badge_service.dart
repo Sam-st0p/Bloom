@@ -28,6 +28,23 @@ class BadgeService {
     final userId = _db.auth.currentUser?.id;
     if (userId == null) return [];
 
+    // 1) Preferred: let the database award badges (award_my_badges() from
+    //    supabase_badges_auto_award.sql). Not affected by RLS.
+    try {
+      final res = await _db.rpc('award_my_badges');
+      final names = (res is List)
+          ? res
+              .map((e) => e is Map ? e.values.first.toString() : e.toString())
+              .toList()
+          : <String>[];
+      debugPrint('[BadgeService] award_my_badges -> $names');
+      return names;
+    } catch (e) {
+      debugPrint('[BadgeService] award_my_badges RPC not available, '
+          'falling back to in-app check: $e');
+    }
+
+    // 2) Fallback: check in the app.
     final newlyAwarded = <String>[];
 
     try {
@@ -139,17 +156,39 @@ class BadgeService {
   /// Returns the user's current value for a criteria type, or -1 if the
   /// type isn't supported.
   static Future<int> _countFor(String type, String userId) async {
+    // Same flexible matching as the SQL function (e.g. "complete_modules").
+    if (type.contains('perfect')) {
+      type = 'perfect_score';
+    } else if (type.contains('module')) {
+      type = 'modules_completed';
+    } else if (type.contains('assessment') || type.contains('quiz')) {
+      type = 'assessments_passed';
+    } else if (type.contains('certificate')) {
+      type = 'certificates_earned';
+    } else if (type.contains('evaluat')) {
+      type = 'seminars_evaluated';
+    } else if (type.contains('seminar')) {
+      type = 'seminars_joined';
+    } else if (type.contains('forum')) {
+      type = 'forum_posts';
+    }
     try {
       switch (type) {
         case 'modules_completed':
         case 'module_completed':
         case 'modules':
+          // Done = status 'completed' OR progress reached 100%
           final r = await _db
               .from('module_progress')
-              .select('id')
-              .eq('user_id', userId)
-              .eq('status', 'completed');
-          return (r as List).length;
+              .select('module_id, status, progress_percent')
+              .eq('user_id', userId);
+          return (r as List)
+              .where((m) =>
+                  m['status'] == 'completed' ||
+                  ((m['progress_percent'] as num?) ?? 0) >= 100)
+              .map((m) => m['module_id'].toString())
+              .toSet()
+              .length;
 
         case 'assessments_passed':
         case 'assessment_passed':
@@ -161,6 +200,21 @@ class BadgeService {
               .eq('passed', true);
           // count distinct assessments, not attempts
           return (r as List).map((e) => e['assessment_id'].toString()).toSet().length;
+
+        case 'perfect_score':
+          final r = await _db
+              .from('assessment_attempts')
+              .select('assessment_id, score, max_score')
+              .eq('user_id', userId);
+          return (r as List)
+              .where((a) {
+                final max = (a['max_score'] as num?) ?? 0;
+                final score = (a['score'] as num?) ?? 0;
+                return max > 0 && score >= max;
+              })
+              .map((a) => a['assessment_id'].toString())
+              .toSet()
+              .length;
 
         case 'certificates_earned':
         case 'certificates':
@@ -188,6 +242,17 @@ class BadgeService {
               .select('id')
               .eq('user_id', userId);
           return (r as List).length;
+
+        case 'forum_posts':
+          final posts = await _db
+              .from('forum_posts')
+              .select('id')
+              .eq('user_id', userId);
+          final replies = await _db
+              .from('forum_replies')
+              .select('id')
+              .eq('user_id', userId);
+          return (posts as List).length + (replies as List).length;
 
         default:
           debugPrint('[BadgeService] unsupported criteria_type "$type"');
@@ -226,6 +291,10 @@ class BadgeRequirement {
       case 'assessment_passed':
       case 'assessments':
         return 'Pass $n ${plural('assessment')}';
+      case 'perfect_score':
+        return 'Get a perfect score on $n ${plural('assessment')}';
+      case 'seminars_attended':
+        return 'Attend $n ${plural('seminar')}';
       case 'certificates_earned':
       case 'certificates':
         return 'Earn $n ${plural('certificate')}';
@@ -236,6 +305,9 @@ class BadgeRequirement {
       case 'seminars_evaluated':
       case 'evaluations':
         return 'Submit $n seminar ${plural('evaluation')}';
+      case 'forum_posts':
+      case 'forum':
+        return n == 1 ? 'Make 1 forum post or reply' : 'Make $n forum posts or replies';
       default:
         return type.isEmpty ? 'Special requirement' : type.replaceAll('_', ' ');
     }

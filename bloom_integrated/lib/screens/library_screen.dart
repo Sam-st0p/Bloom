@@ -276,11 +276,10 @@ class _LibraryScreenState extends State<LibraryScreen> {
     );
 
     try {
-        final files = await _supabase
+      final files = await _supabase
           .from('module_files')
           .select('*')
           .eq('module_id', module.id)
-          .neq('file_url', '__content__') // hide the Content Creator's auto-save record
           .order('sort_order');
       if (mounted) {
         setState(() {
@@ -454,17 +453,41 @@ class _LibraryScreenState extends State<LibraryScreen> {
                         if (_railVisible) _continueRail(),
                         _statusBar(),
                         _categoryBar(),
-                        if (_filters.hasActiveFilters) _buildActiveFiltersRow(),
+                        if (_filters.author != null ||
+                            _filters.dateFrom != null ||
+                            _filters.dateTo != null)
+                          _buildActiveFiltersRow(),
                         Padding(
                           padding: const EdgeInsets.fromLTRB(16, 8, 16, 24),
                           child: Column(
                             crossAxisAlignment: CrossAxisAlignment.start,
                             children: [
-                              Text('${_filtered.length} of ${_modules.length} loaded modules',
-                                  style: GoogleFonts.nunito(
-                                      fontSize: 11,
-                                      fontWeight: FontWeight.w600,
-                                      color: AppColors.textLight)),
+                              Row(
+                                children: [
+                                  Expanded(
+                                    child: Text(
+                                        '${_filtered.length} of ${_modules.length} loaded modules',
+                                        style: GoogleFonts.nunito(
+                                            fontSize: 11,
+                                            fontWeight: FontWeight.w600,
+                                            color: AppColors.textLight)),
+                                  ),
+                                  if (_filters.hasActiveFilters)
+                                    GestureDetector(
+                                      onTap: _clearFilters,
+                                      behavior: HitTestBehavior.opaque,
+                                      child: Padding(
+                                        padding: const EdgeInsets.symmetric(
+                                            vertical: 4, horizontal: 2),
+                                        child: Text('Clear filters',
+                                            style: GoogleFonts.nunito(
+                                                fontSize: 12,
+                                                color: AppColors.primary,
+                                                fontWeight: FontWeight.w800)),
+                                      ),
+                                    ),
+                                ],
+                              ),
                               const SizedBox(height: 12),
                               if (_filtered.isEmpty)
                                 _emptyState()
@@ -741,62 +764,30 @@ class _LibraryScreenState extends State<LibraryScreen> {
     );
   }
 
+  /// Chips for filters chosen in the filter sheet (author, date range).
+  /// Progress and category aren't repeated here — they're already shown
+  /// as selected chips in the two rows above.
   Widget _buildActiveFiltersRow() {
-    return Container(
-      color: Colors.white,
-      padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
-      child: Row(
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 0, 16, 4),
+      child: Wrap(
+        spacing: 6,
+        runSpacing: 6,
         children: [
-          Expanded(
-            child: SingleChildScrollView(
-              scrollDirection: Axis.horizontal,
-              child: Row(children: [
-                if (_filters.progress != ProgressFilter.all)
-                  _ActiveChip(
-                    label: _progressLabel(_filters.progress),
-                    onRemove: () => setState(() => _filters =
-                        _filters.copyWith(progress: ProgressFilter.all)),
-                  ),
-                if (_filters.categoryName != null) ...[
-                  const SizedBox(width: 6),
-                  _ActiveChip(
-                    label: _filters.categoryName!,
-                    onRemove: () => setState(() => _filters =
-                        _filters.copyWith(categoryName: null)),
-                  ),
-                ],
-                if (_filters.author != null) ...[
-                  const SizedBox(width: 6),
-                  _ActiveChipWithIcon(
-                    icon: Icons.person_outline,
-                    label: _filters.author!,
-                    onRemove: () => setState(
-                        () => _filters = _filters.copyWith(author: null)),
-                  ),
-                ],
-                if (_filters.dateFrom != null ||
-                    _filters.dateTo != null) ...[
-                  const SizedBox(width: 6),
-                  _ActiveChipWithIcon(
-                    icon: Icons.calendar_today_outlined,
-                    label:
-                        '${_filters.dateFrom ?? '...'} -> ${_filters.dateTo ?? '...'}',
-                    onRemove: () => setState(() => _filters =
-                        _filters.copyWith(dateFrom: null, dateTo: null)),
-                  ),
-                ],
-              ]),
+          if (_filters.author != null)
+            _ActiveChipWithIcon(
+              icon: Icons.person_outline,
+              label: _filters.author!,
+              onRemove: () =>
+                  setState(() => _filters = _filters.copyWith(author: null)),
             ),
-          ),
-          const SizedBox(width: 8),
-          GestureDetector(
-            onTap: _clearFilters,
-            child: Text('Clear all',
-                style: GoogleFonts.nunito(
-                    fontSize: 12,
-                    color: AppColors.primary,
-                    fontWeight: FontWeight.w800)),
-          ),
+          if (_filters.dateFrom != null || _filters.dateTo != null)
+            _ActiveChipWithIcon(
+              icon: Icons.calendar_today_outlined,
+              label: '${_filters.dateFrom ?? '...'} → ${_filters.dateTo ?? '...'}',
+              onRemove: () => setState(() =>
+                  _filters = _filters.copyWith(dateFrom: null, dateTo: null)),
+            ),
         ],
       ),
     );
@@ -1373,36 +1364,6 @@ class _MetaChip extends StatelessWidget {
         ),
       ),
     ]);
-  }
-}
-
-class _ActiveChip extends StatelessWidget {
-  final String label;
-  final VoidCallback onRemove;
-  const _ActiveChip({required this.label, required this.onRemove});
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
-      decoration: BoxDecoration(
-        color: AppColors.primary.withValues(alpha: 0.1),
-        borderRadius: BorderRadius.circular(20),
-        border: Border.all(color: AppColors.primary.withValues(alpha: 0.3)),
-      ),
-      child: Row(mainAxisSize: MainAxisSize.min, children: [
-        Text(label,
-            style: GoogleFonts.nunito(
-                fontSize: 12,
-                fontWeight: FontWeight.w700,
-                color: AppColors.primary)),
-        const SizedBox(width: 5),
-        GestureDetector(
-            onTap: onRemove,
-            child: const Icon(Icons.close,
-                size: 14, color: AppColors.primary)),
-      ]),
-    );
   }
 }
 

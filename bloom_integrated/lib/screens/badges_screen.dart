@@ -4,23 +4,6 @@
 // "up next" badge card, richer badge tiles, certificate cards with inline
 // Save/Share) wired to the real Supabase data layer and the real
 // certificate-capture code from the previous badges_screen.dart.
-//
-// Worth knowing about:
-//   - The header's mini-stats are real numbers (certificate count, badges
-//     still locked) instead of the streak/points placeholders from the
-//     redesign — there's no streak/points table in the schema, and I'd
-//     rather not show static fake numbers dressed up as live data.
-//   - Same reasoning for the "up next" card and locked badge tiles: there's
-//     no per-badge progress field in `badges`, so instead of a fabricated
-//     progress bar, locked badges show their real description text, and
-//     the highlighted "up next" badge is just the next one alphabetically
-//     (since `badges` is queried ordered by name) with its real hint text.
-//   - The inline Save/Share buttons on a certificate card now route
-//     through the existing CertificateViewerScreen with an `autoAction`
-//     flag, then trigger the same _saveToGallery()/_shareImage() you
-//     already had, once the certificate has actually rendered. That avoids
-//     re-implementing the image-capture logic against an off-screen
-//     widget, which would have been fragile.
 
 import 'dart:io';
 import 'dart:typed_data';
@@ -629,7 +612,7 @@ class _BadgeTile extends StatelessWidget {
         color: earned ? Colors.white : const Color(0xFFFBFCFB),
         borderRadius: BorderRadius.circular(14),
         border: Border.all(
-          color: earned ? const Color(0xFFFDE047) : AppColors.border,
+          color: earned ? const Color(0xFFE9C46A) : AppColors.border,
           width: 1.5,
         ),
         boxShadow: earned
@@ -651,7 +634,7 @@ class _BadgeTile extends StatelessWidget {
                       ? const LinearGradient(
                           begin: Alignment.topLeft,
                           end: Alignment.bottomRight,
-                          colors: [Color(0xFFFEF9C3), Color(0xFFFDE68A)])
+                          colors: [Color(0xFFFFF4D6), Color(0xFFF8E1A1)])
                       : null,
                   color: earned ? null : const Color(0xFFF3F4F6),
                   borderRadius: BorderRadius.circular(13),
@@ -1425,12 +1408,12 @@ class _BadgeDetailSheetState extends State<_BadgeDetailSheet> {
                   ? const LinearGradient(
                       begin: Alignment.topLeft,
                       end: Alignment.bottomRight,
-                      colors: [Color(0xFFFEF9C3), Color(0xFFFDE68A)])
+                      colors: [Color(0xFFFFF4D6), Color(0xFFF8E1A1)])
                   : null,
               color: earned ? null : const Color(0xFFF3F4F6),
               borderRadius: BorderRadius.circular(22),
               border: Border.all(
-                  color: earned ? const Color(0xFFFDE047) : AppColors.border,
+                  color: earned ? const Color(0xFFE9C46A) : AppColors.border,
                   width: 2),
             ),
             child: Center(

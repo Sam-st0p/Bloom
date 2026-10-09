@@ -786,9 +786,9 @@ class _ProfileScreenState extends State<ProfileScreen> {
           Container(
             width: 80, height: 80,
             decoration: BoxDecoration(
-              color: const Color(0xFFFEF9C3),
+              color: const Color(0xFFFFF4D6),
               borderRadius: BorderRadius.circular(20),
-              border: Border.all(color: const Color(0xFFFDE047), width: 2),
+              border: Border.all(color: const Color(0xFFE9C46A), width: 2),
             ),
             child: Center(child: icon != null
                 ? ClipRRect(borderRadius: BorderRadius.circular(14),
@@ -1880,7 +1880,7 @@ class ProfileBadgePreview extends StatelessWidget {
         decoration: BoxDecoration(
           color: Colors.white,
           borderRadius: BorderRadius.circular(12),
-          border: Border.all(color: const Color(0xFFFDE047), width: 1.5),
+          border: Border.all(color: const Color(0xFFE9C46A), width: 1.5),
           boxShadow: [
             BoxShadow(
                 color: Colors.black.withValues(alpha: 0.06),
@@ -1899,21 +1899,21 @@ class ProfileBadgePreview extends StatelessWidget {
                 gradient: LinearGradient(
                   begin: Alignment.topLeft,
                   end: Alignment.bottomRight,
-                  colors: [Color(0xFFFEF9C3), Color(0xFFFDE68A)],
+                  colors: [Color(0xFFFFF4D6), Color(0xFFF8E1A1)],
                 ),
                 borderRadius: BorderRadius.all(Radius.circular(12)),
               ),
               child: Center(
-                child: iconUrl != null
+                child: (iconUrl ?? '').isNotEmpty
                     ? Image.network(iconUrl!,
                         width: 30,
                         height: 30,
                         fit: BoxFit.contain,
                         errorBuilder: (_, __, ___) => const Icon(
-                            Icons.emoji_events_rounded,
+                            Icons.military_tech_rounded,
                             size: 26,
                             color: AppColors.primaryDark))
-                    : const Icon(Icons.emoji_events_rounded,
+                    : const Icon(Icons.military_tech_rounded,
                         size: 26, color: AppColors.primaryDark),
               ),
             ),
@@ -1934,4 +1934,4 @@ class ProfileBadgePreview extends StatelessWidget {
       ),
     );
   }
-} 
+}
