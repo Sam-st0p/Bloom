@@ -1,3 +1,4 @@
+import 'dart:convert';
 // lib/screens/library_screen.dart
 
 import 'package:flutter/material.dart';
@@ -283,7 +284,15 @@ class _LibraryScreenState extends State<LibraryScreen> {
           .order('sort_order');
       if (mounted) {
         setState(() {
-          _moduleFiles  = List<Map<String, dynamic>>.from(files as List);
+          // Drop empty "lesson content" rows the admin editor saves
+          // (e.g. {"docContent":"<p><br></p>","slides":[...]}) so raw
+          // JSON never shows up as a file name.
+          _moduleFiles  = List<Map<String, dynamic>>.from(files as List)
+              .where((f) {
+                final lesson = LessonContent.fromFile(f);
+                return lesson == null || !lesson.isEmpty;
+              })
+              .toList();
           _loadingFiles = false;
         });
       }
@@ -297,6 +306,24 @@ class _LibraryScreenState extends State<LibraryScreen> {
   // (image preview, or a file-info card for video/PPTX/DOCX/etc).
   // Both viewers expose the same download icon button in their app bar.
   Future<void> _openFile(Map<String, dynamic> file) async {
+    final lesson = LessonContent.fromFile(file);
+    if (lesson != null) {
+      await ActivityService.log(
+        activityType:  'file_opened',
+        referenceId:   file['id']?.toString(),
+        referenceType: 'module_file',
+        metadata: {'file_name': lesson.title, 'module_id': file['module_id']},
+      );
+      if (!mounted) return;
+      Navigator.push(context, MaterialPageRoute(
+        builder: (_) => _LessonReaderScreen(
+          lesson: lesson,
+          moduleTitle: _selectedModule?.title ?? 'Lesson',
+        ),
+      ));
+      return;
+    }
+
     final url = file['file_url']?.toString();
     if (url == null || url.isEmpty) {
       if (mounted) {
@@ -1798,6 +1825,8 @@ class _FileTile extends StatelessWidget {
   final VoidCallback onTap;
   const _FileTile({required this.file, required this.onTap});
 
+  LessonContent? get _lesson => LessonContent.fromFile(file);
+
   bool get _isPdf {
     final type = (file['file_type'] ?? '').toString().toLowerCase();
     final name = (file['file_name'] ?? '').toString().toLowerCase();
@@ -1805,6 +1834,7 @@ class _FileTile extends StatelessWidget {
   }
 
   IconData get _icon {
+    if (_lesson != null) return Icons.menu_book_outlined;
     final type = (file['file_type'] ?? '').toString().toLowerCase();
     final name = (file['file_name'] ?? '').toString().toLowerCase();
     if (type.contains('pdf') || name.endsWith('.pdf')) {
@@ -1828,6 +1858,7 @@ class _FileTile extends StatelessWidget {
   }
 
   Color get _iconColor {
+    if (_lesson != null) return AppColors.primary;
     final type = (file['file_type'] ?? '').toString().toLowerCase();
     final name = (file['file_name'] ?? '').toString().toLowerCase();
     if (type.contains('pdf') || name.endsWith('.pdf')) {
@@ -1879,13 +1910,17 @@ class _FileTile extends StatelessWidget {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Text(file['file_name'] ?? 'File',
+                  Text(_lesson?.title ?? file['file_name']?.toString() ?? 'File',
                       style: GoogleFonts.nunito(
                           fontSize: 13,
                           fontWeight: FontWeight.w700,
                           color: AppColors.textDark),
                       overflow: TextOverflow.ellipsis),
-                  if (_fileSize.isNotEmpty)
+                  if (_lesson != null)
+                    Text(_lesson!.subtitle,
+                        style: GoogleFonts.nunito(
+                            fontSize: 11, color: AppColors.textLight))
+                  else if (_fileSize.isNotEmpty)
                     Text(_fileSize,
                         style: GoogleFonts.nunito(
                             fontSize: 11, color: AppColors.textLight)),
@@ -1901,13 +1936,15 @@ class _FileTile extends StatelessWidget {
               ),
               child: Row(mainAxisSize: MainAxisSize.min, children: [
                 Icon(
-                  _isPdf ? Icons.picture_as_pdf_outlined : Icons.visibility_outlined,
+                  _lesson != null
+                      ? Icons.chrome_reader_mode_outlined
+                      : (_isPdf ? Icons.picture_as_pdf_outlined : Icons.visibility_outlined),
                   size: 14,
                   color: AppColors.primary,
                 ),
                 const SizedBox(width: 4),
                 Text(
-                  'View',
+                  _lesson != null ? 'Read' : 'View',
                   style: GoogleFonts.nunito(
                       fontSize: 12,
                       fontWeight: FontWeight.w700,
@@ -2009,4 +2046,186 @@ class _ExpandableDescriptionState extends State<_ExpandableDescription> {
       ],
     );
   }
+}
+
+// ─────────────────────────────────────────────────────────────────
+//  LESSON CONTENT — text/slides written in the admin editor are stored
+//  in module_files as JSON: {"docContent":"<p>..</p>","slides":[{..}]}
+// ─────────────────────────────────────────────────────────────────
+class LessonSlide {
+  final String title;
+  final String body;
+  const LessonSlide(this.title, this.body);
+  bool get isEmpty => title.trim().isEmpty && htmlToPlain(body).trim().isEmpty;
+}
+
+class LessonContent {
+  final String docHtml;
+  final List<LessonSlide> slides;
+  const LessonContent(this.docHtml, this.slides);
+
+  /// Returns the parsed lesson if any text field of the row holds the
+  /// editor JSON, otherwise null (it's a normal uploaded file).
+  static LessonContent? fromFile(Map<String, dynamic> file) {
+    for (final key in ['file_name', 'content', 'file_url', 'body']) {
+      final raw = file[key];
+      final decoded = _decode(raw);
+      if (decoded != null) return decoded;
+    }
+    return null;
+  }
+
+  static LessonContent? _decode(dynamic raw) {
+    Map<String, dynamic>? map;
+    if (raw is Map<String, dynamic>) {
+      map = raw;
+    } else if (raw is String) {
+      final t = raw.trim();
+      if (!t.startsWith('{') || !t.contains('docContent') && !t.contains('slides')) {
+        return null;
+      }
+      try {
+        final d = jsonDecode(t);
+        if (d is Map<String, dynamic>) map = d;
+      } catch (_) {
+        return null;
+      }
+    }
+    if (map == null ||
+        (!map.containsKey('docContent') && !map.containsKey('slides'))) {
+      return null;
+    }
+    final slides = <LessonSlide>[];
+    final rawSlides = map['slides'];
+    if (rawSlides is List) {
+      for (final sl in rawSlides) {
+        if (sl is Map) {
+          slides.add(LessonSlide(
+            sl['title']?.toString() ?? '',
+            sl['body']?.toString() ?? '',
+          ));
+        }
+      }
+    }
+    return LessonContent(map['docContent']?.toString() ?? '', slides);
+  }
+
+  List<LessonSlide> get filledSlides =>
+      slides.where((s) => !s.isEmpty).toList();
+
+  bool get hasDoc => htmlToPlain(docHtml).trim().isNotEmpty;
+
+  bool get isEmpty => !hasDoc && filledSlides.isEmpty;
+
+  String get title {
+    final first = filledSlides.where((s) => s.title.trim().isNotEmpty);
+    if (!hasDoc && first.isNotEmpty) return first.first.title.trim();
+    return 'Lesson notes';
+  }
+
+  String get subtitle {
+    final n = filledSlides.length;
+    if (hasDoc && n > 0) return 'Reading · $n slide${n == 1 ? '' : 's'}';
+    if (n > 0) return '$n slide${n == 1 ? '' : 's'}';
+    return 'Reading';
+  }
+}
+
+/// Very small HTML → text converter for the editor's output
+/// (paragraphs, line breaks, headings, lists, basic entities).
+String htmlToPlain(String html) {
+  var t = html
+      .replaceAll(RegExp(r'<br\s*/?>', caseSensitive: false), '\n')
+      .replaceAll(RegExp(r'</(p|div|h[1-6])>', caseSensitive: false), '\n\n')
+      .replaceAll(RegExp(r'<li[^>]*>', caseSensitive: false), '• ')
+      .replaceAll(RegExp(r'</li>', caseSensitive: false), '\n')
+      .replaceAll(RegExp(r'<[^>]+>'), '')
+      .replaceAll('&nbsp;', ' ')
+      .replaceAll('&amp;', '&')
+      .replaceAll('&lt;', '<')
+      .replaceAll('&gt;', '>')
+      .replaceAll('&quot;', '"')
+      .replaceAll('&#39;', "'");
+  t = t.replaceAll(RegExp(r'[ \t]+\n'), '\n');
+  t = t.replaceAll(RegExp(r'\n{3,}'), '\n\n');
+  return t.trim();
+}
+
+class _LessonReaderScreen extends StatelessWidget {
+  final LessonContent lesson;
+  final String moduleTitle;
+  const _LessonReaderScreen({required this.lesson, required this.moduleTitle});
+
+  @override
+  Widget build(BuildContext context) {
+    final slides = lesson.filledSlides;
+    return Scaffold(
+      backgroundColor: AppColors.background,
+      appBar: AppBar(
+        backgroundColor: AppColors.primaryDark,
+        foregroundColor: Colors.white,
+        elevation: 0,
+        title: Text(moduleTitle,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: GoogleFonts.nunito(
+                fontSize: 16, fontWeight: FontWeight.w800, color: Colors.white)),
+      ),
+      body: ListView(
+        padding: const EdgeInsets.all(16),
+        children: [
+          if (lesson.hasDoc)
+            _card(
+              child: SelectableText(
+                htmlToPlain(lesson.docHtml),
+                style: GoogleFonts.nunito(
+                    fontSize: 15, color: AppColors.textDark, height: 1.6),
+              ),
+            ),
+          for (var i = 0; i < slides.length; i++)
+            _card(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text('SLIDE ${i + 1} OF ${slides.length}',
+                      style: GoogleFonts.nunito(
+                          fontSize: 10,
+                          fontWeight: FontWeight.w800,
+                          letterSpacing: 0.6,
+                          color: AppColors.primaryLight)),
+                  if (slides[i].title.trim().isNotEmpty) ...[
+                    const SizedBox(height: 6),
+                    Text(slides[i].title.trim(),
+                        style: GoogleFonts.nunito(
+                            fontSize: 17,
+                            fontWeight: FontWeight.w900,
+                            color: AppColors.textDark)),
+                  ],
+                  if (htmlToPlain(slides[i].body).isNotEmpty) ...[
+                    const SizedBox(height: 8),
+                    SelectableText(htmlToPlain(slides[i].body),
+                        style: GoogleFonts.nunito(
+                            fontSize: 14,
+                            color: AppColors.textMid,
+                            height: 1.55)),
+                  ],
+                ],
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+
+  Widget _card({required Widget child}) => Container(
+        width: double.infinity,
+        margin: const EdgeInsets.only(bottom: 12),
+        padding: const EdgeInsets.all(18),
+        decoration: BoxDecoration(
+          color: Colors.white,
+          borderRadius: BorderRadius.circular(16),
+          border: Border.all(color: AppColors.border),
+        ),
+        child: child,
+      );
 }
