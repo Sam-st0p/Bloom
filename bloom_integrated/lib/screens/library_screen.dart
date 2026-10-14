@@ -147,10 +147,14 @@ class _LibraryScreenState extends State<LibraryScreen> {
       if (userId != null) {
         final progressData = await _supabase
             .from('module_progress')
-            .select('module_id, progress_percent')
+            .select('module_id, progress_percent, status')
             .eq('user_id', userId);
         for (final p in progressData as List) {
-          progressMap[p['module_id'].toString()] = (p['progress_percent'] as num?)?.toInt() ?? 0;
+          // Same rule as the "Completed" counter in the header: a module
+          // is done if its status is 'completed' OR it reached 100%.
+          final pct = (p['progress_percent'] as num?)?.toInt() ?? 0;
+          progressMap[p['module_id'].toString()] =
+              p['status'] == 'completed' ? 100 : (pct > 100 ? 100 : pct);
         }
       }
 
@@ -164,6 +168,9 @@ class _LibraryScreenState extends State<LibraryScreen> {
           _hasMore     = list.length == _pageSize;
           _loading     = false;
         });
+        if (_filters.hasActiveFilters || _search.isNotEmpty) {
+          _loadAllRemaining();
+        }
       }
     } catch (e) {
       if (mounted) setState(() => _loading = false);
@@ -197,6 +204,29 @@ class _LibraryScreenState extends State<LibraryScreen> {
     } catch (_) {
       if (mounted) setState(() => _loadingMore = false);
     }
+  }
+
+  /// Filters and search only look at modules already loaded, and paging
+  /// is paused while they're on. So when one is turned on, fetch the
+  /// remaining pages first — otherwise a completed module on page 2 never
+  /// shows up under "Completed".
+  Future<void> _loadAllRemaining() async {
+    var guard = 0;
+    while (mounted && _hasMore && guard < 50) {
+      guard++;
+      if (_loadingMore) {
+        await Future.delayed(const Duration(milliseconds: 100));
+        continue;
+      }
+      final before = _modules.length;
+      await _loadMore();
+      if (_modules.length == before) break; // error or nothing new
+    }
+  }
+
+  void _setFilters(_LibraryFilters f) {
+    setState(() => _filters = f);
+    if (f.hasActiveFilters) _loadAllRemaining();
   }
 
   Future<void> _loadStats() async {
@@ -439,7 +469,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
       builder: (_) => _FilterSheet(
         authors: _authors,
         currentFilters: _filters,
-        onApply: (f) => setState(() => _filters = f),
+        onApply: _setFilters,
       ),
     );
   }
@@ -642,7 +672,10 @@ class _LibraryScreenState extends State<LibraryScreen> {
         Expanded(
           child: TextField(
             controller: _searchCtrl,
-            onChanged: (v) => setState(() => _search = v),
+            onChanged: (v) {
+              setState(() => _search = v);
+              if (v.isNotEmpty) _loadAllRemaining();
+            },
             style: GoogleFonts.nunito(
                 color: Colors.white, fontSize: 14, fontWeight: FontWeight.w500),
             cursorColor: Colors.white,
@@ -731,7 +764,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
             return Padding(
               padding: const EdgeInsets.only(right: 8),
               child: GestureDetector(
-                onTap: () => setState(() => _filters = _filters.copyWith(progress: f)),
+                onTap: () => _setFilters(_filters.copyWith(progress: f)),
                 child: Container(
                   padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
                   decoration: BoxDecoration(
@@ -767,8 +800,8 @@ class _LibraryScreenState extends State<LibraryScreen> {
             return Padding(
               padding: const EdgeInsets.only(right: 8),
               child: GestureDetector(
-                onTap: () => setState(
-                    () => _filters = _filters.copyWith(categoryName: c == 'All' ? null : c)),
+                onTap: () => _setFilters(
+                    _filters.copyWith(categoryName: c == 'All' ? null : c)),
                 child: Container(
                   padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
                   decoration: BoxDecoration(
