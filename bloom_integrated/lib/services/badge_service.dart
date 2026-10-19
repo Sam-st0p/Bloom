@@ -13,11 +13,14 @@
 //   - LibraryScreen, after a module reaches 100%
 //   - BadgesScreen, every time it loads (catch-up for existing users)
 
+
 import 'package:flutter/foundation.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
+
 class BadgeService {
   static SupabaseClient get _db => Supabase.instance.client;
+
 
   /// Checks every row in `badge_criteria` against the user's real progress
   /// and inserts any missing rows into `student_badges`.
@@ -27,6 +30,7 @@ class BadgeService {
   static Future<List<String>> checkAndAward() async {
     final userId = _db.auth.currentUser?.id;
     if (userId == null) return [];
+
 
     // 1) Preferred: let the database award badges (award_my_badges() from
     //    supabase_badges_auto_award.sql). Not affected by RLS.
@@ -44,8 +48,10 @@ class BadgeService {
           'falling back to in-app check: $e');
     }
 
+
     // 2) Fallback: check in the app.
     final newlyAwarded = <String>[];
+
 
     try {
       final criteria = List<Map<String, dynamic>>.from(
@@ -57,6 +63,7 @@ class BadgeService {
         return [];
       }
 
+
       // Badge names, for the "unlocked" message (separate query so we don't
       // depend on a foreign key between badge_criteria and badges).
       final names = <String, String>{};
@@ -67,12 +74,14 @@ class BadgeService {
         }
       } catch (_) {}
 
+
       final earned = await _db
           .from('student_badges')
           .select('badge_id')
           .eq('user_id', userId);
       final earnedIds =
           Set<String>.from((earned as List).map((e) => e['badge_id'].toString()));
+
 
       // Load each counter lazily and only once.
       final counts = <String, int>{};
@@ -83,9 +92,11 @@ class BadgeService {
         return v;
       }
 
+
       for (final c in criteria) {
         final badgeId = c['badge_id']?.toString();
         if (badgeId == null || earnedIds.contains(badgeId)) continue;
+
 
         final type = (c['criteria_type'] as String? ?? '').trim().toLowerCase();
         // threshold may come back as int, double or string depending on column type
@@ -93,9 +104,11 @@ class BadgeService {
             (c['threshold_value'] as num?)?.toInt() ??
             1;
 
+
         final current = await count(type);
         if (current < 0) continue; // unknown/unsupported type
         if (current < threshold) continue;
+
 
         try {
           await _db.from('student_badges').insert({
@@ -120,8 +133,10 @@ class BadgeService {
       debugPrint('[BadgeService] checkAndAward error: $e');
     }
 
+
     return newlyAwarded;
   }
+
 
   /// Requirements for one badge with the user's current progress, used by
   /// the badge detail sheet. Empty list if the badge has no criteria.
@@ -153,6 +168,7 @@ class BadgeService {
     }
   }
 
+
   /// Returns the user's current value for a criteria type, or -1 if the
   /// type isn't supported.
   static Future<int> _countFor(String type, String userId) async {
@@ -167,6 +183,8 @@ class BadgeService {
       type = 'certificates_earned';
     } else if (type.contains('evaluat')) {
       type = 'seminars_evaluated';
+    } else if (type.contains('attend')) {
+      type = 'seminars_attended';
     } else if (type.contains('seminar')) {
       type = 'seminars_joined';
     } else if (type.contains('forum')) {
@@ -190,6 +208,7 @@ class BadgeService {
               .toSet()
               .length;
 
+
         case 'assessments_passed':
         case 'assessment_passed':
         case 'assessments':
@@ -201,20 +220,22 @@ class BadgeService {
           // count distinct assessments, not attempts
           return (r as List).map((e) => e['assessment_id'].toString()).toSet().length;
 
+
         case 'perfect_score':
           final r = await _db
               .from('assessment_attempts')
-              .select('assessment_id, score, max_score')
+              .select('assessment_id, score')
               .eq('user_id', userId);
           return (r as List)
               .where((a) {
-                final max = (a['max_score'] as num?) ?? 0;
+                // score is saved as a percentage (0-100), so perfect = 100
                 final score = (a['score'] as num?) ?? 0;
-                return max > 0 && score >= max;
+                return score >= 100;
               })
               .map((a) => a['assessment_id'].toString())
               .toSet()
               .length;
+
 
         case 'certificates_earned':
         case 'certificates':
@@ -224,6 +245,16 @@ class BadgeService {
               .eq('user_id', userId)
               .eq('is_revoked', false);
           return (r as List).length;
+
+
+        case 'seminars_attended':
+          // Real attendance: stayed long enough to be marked present
+          final r = await _db
+              .from('seminar_attendance')
+              .select('seminar_id')
+              .eq('user_id', userId);
+          return (r as List).map((e) => e['seminar_id'].toString()).toSet().length;
+
 
         case 'seminars_registered':
         case 'seminars_joined':
@@ -235,6 +266,7 @@ class BadgeService {
               .neq('status', 'cancelled');
           return (r as List).length;
 
+
         case 'seminars_evaluated':
         case 'evaluations':
           final r = await _db
@@ -242,6 +274,7 @@ class BadgeService {
               .select('id')
               .eq('user_id', userId);
           return (r as List).length;
+
 
         case 'forum_posts':
           final posts = await _db
@@ -254,6 +287,7 @@ class BadgeService {
               .eq('user_id', userId);
           return (posts as List).length + (replies as List).length;
 
+
         default:
           debugPrint('[BadgeService] unsupported criteria_type "$type"');
           return -1;
@@ -265,10 +299,12 @@ class BadgeService {
   }
 }
 
+
 class BadgeRequirement {
   final String type;
   final int threshold;
   final int? current; // null = type not tracked by the app
+
 
   const BadgeRequirement({
     required this.type,
@@ -276,8 +312,10 @@ class BadgeRequirement {
     required this.current,
   });
 
+
   double get progress =>
       current == null || threshold <= 0 ? 0 : (current! / threshold).clamp(0, 1).toDouble();
+
 
   String get label {
     final n = threshold;

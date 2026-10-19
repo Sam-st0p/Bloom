@@ -5,6 +5,8 @@
 // Save/Share) wired to the real Supabase data layer and the real
 // certificate-capture code from the previous badges_screen.dart.
 
+
+import 'dart:async';
 import 'dart:io';
 import 'dart:typed_data';
 import 'dart:ui' as ui;
@@ -18,7 +20,9 @@ import 'package:gal/gal.dart';
 import '../theme/app_theme.dart';
 import '../services/badge_service.dart';
 
+
 final _db = Supabase.instance.client;
+
 
 String _fmtDate(String? iso) {
   if (iso == null) return '—';
@@ -28,6 +32,7 @@ String _fmtDate(String? iso) {
     return '${months[d.month - 1]} ${d.day}, ${d.year}';
   } catch (_) { return iso; }
 }
+
 
 // ─────────────────────────────────────────────────────────────────
 //  BADGES SCREEN
@@ -39,6 +44,7 @@ class BadgesScreen extends StatefulWidget {
   State<BadgesScreen> createState() => _BadgesScreenState();
 }
 
+
 class _BadgesScreenState extends State<BadgesScreen> {
   List<Map<String, dynamic>> _earnedBadges = [];
   List<Map<String, dynamic>> _allBadges = [];
@@ -48,11 +54,13 @@ class _BadgesScreenState extends State<BadgesScreen> {
   String? _error;
   late int _tab = widget.initialTab;
 
+
   @override
   void initState() {
     super.initState();
     _load();
   }
+
 
   // MainShell re-uses this State when it only changes `initialTab`
   // (e.g. tapping a certificate notification while already on this tab).
@@ -63,6 +71,7 @@ class _BadgesScreenState extends State<BadgesScreen> {
       setState(() => _tab = widget.initialTab);
     }
   }
+
 
   /// Runs one query and returns [fallback] if it fails, so one broken
   /// query (missing column, RLS) no longer leaves the whole screen
@@ -77,6 +86,7 @@ class _BadgesScreenState extends State<BadgesScreen> {
       return fallback;
     }
   }
+
 
   Future<void> _load() async {
     if (!mounted) return;
@@ -95,8 +105,10 @@ class _BadgesScreenState extends State<BadgesScreen> {
       return;
     }
 
+
     // Catch-up: award any badges the user already qualifies for.
     final unlocked = await BadgeService.checkAndAward();
+
 
     final errors = <String>[];
     final results = await Future.wait<dynamic>([
@@ -118,6 +130,7 @@ class _BadgesScreenState extends State<BadgesScreen> {
           null, errors),
     ]);
 
+
     if (!mounted) return;
     setState(() {
       _earnedBadges = List<Map<String, dynamic>>.from(results[0] as List);
@@ -131,6 +144,7 @@ class _BadgesScreenState extends State<BadgesScreen> {
       _loading = false;
     });
 
+
     if (unlocked.isNotEmpty && mounted) {
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(
         content: Text('🏅 Badge unlocked: ${unlocked.join(', ')}',
@@ -141,6 +155,7 @@ class _BadgesScreenState extends State<BadgesScreen> {
     }
   }
 
+
   /// The badge row for an earned student_badges entry. Falls back to the
   /// full badge list if the embedded join came back empty.
   Map<String, dynamic> _badgeOf(Map<String, dynamic> sb) {
@@ -150,6 +165,7 @@ class _BadgesScreenState extends State<BadgesScreen> {
     return _allBadges.firstWhere((b) => b['id']?.toString() == id,
         orElse: () => <String, dynamic>{});
   }
+
 
   void _openBadge(Map<String, dynamic> badge,
       {required bool earned, String? awardedAt}) {
@@ -165,9 +181,11 @@ class _BadgesScreenState extends State<BadgesScreen> {
     );
   }
 
+
   Set<String> get _earnedIds => _earnedBadges
       .map((b) => (b['badge_id'] ?? _badgeOf(b)['id'])?.toString() ?? '')
       .toSet();
+
 
   List<Map<String, dynamic>> get _lockedBadges {
     final ids = _earnedIds;
@@ -176,10 +194,13 @@ class _BadgesScreenState extends State<BadgesScreen> {
         .toList();
   }
 
+
   int get _total => _allBadges.isEmpty ? _earnedBadges.length : _allBadges.length;
+
 
   double get _pct =>
       _total == 0 ? 0 : (_earnedBadges.length / _total).clamp(0, 1).toDouble();
+
 
   @override
   Widget build(BuildContext context) {
@@ -217,6 +238,7 @@ class _BadgesScreenState extends State<BadgesScreen> {
       ),
     );
   }
+
 
   // ---- Header with trophy ring ----------------------------------------------
   Widget _header() {
@@ -320,6 +342,7 @@ class _BadgesScreenState extends State<BadgesScreen> {
     );
   }
 
+
   Widget _miniStat(IconData icon, String text, Color iconColor) {
     return Row(
       mainAxisSize: MainAxisSize.min,
@@ -335,6 +358,7 @@ class _BadgesScreenState extends State<BadgesScreen> {
       ],
     );
   }
+
 
   Widget _tabButton(String label, IconData icon, int index) {
     final active = _tab == index;
@@ -374,6 +398,7 @@ class _BadgesScreenState extends State<BadgesScreen> {
     );
   }
 
+
   // ---- Badges tab -----------------------------------------------------------
   Widget _badgesTab() {
     if (_earnedBadges.isEmpty && _allBadges.isEmpty) {
@@ -386,11 +411,13 @@ class _BadgesScreenState extends State<BadgesScreen> {
       ]);
     }
 
+
     final locked = _lockedBadges;
     // `badges` is queried ordered by name, so this is simply the next one
     // alphabetically — there's no per-badge progress tracking to pick a
     // genuinely "nearest" one.
     final next = locked.isNotEmpty ? locked.first : null;
+
 
     return ListView(
       physics: const AlwaysScrollableScrollPhysics(),
@@ -441,6 +468,7 @@ class _BadgesScreenState extends State<BadgesScreen> {
     );
   }
 
+
   Widget _sectionTitle(IconData icon, String text, Color color) => Row(
         children: [
           Icon(icon, size: 16, color: color),
@@ -451,6 +479,7 @@ class _BadgesScreenState extends State<BadgesScreen> {
         ],
       );
 
+
   Widget _grid(List<Widget> tiles) => GridView.count(
         crossAxisCount: 3,
         shrinkWrap: true,
@@ -460,6 +489,7 @@ class _BadgesScreenState extends State<BadgesScreen> {
         childAspectRatio: 0.9,
         children: tiles,
       );
+
 
   // ---- Certificates tab -------------------------------------------------
   Widget _certsTab() {
@@ -499,6 +529,7 @@ class _BadgesScreenState extends State<BadgesScreen> {
   }
 }
 
+
 // ─────────────────────────────────────────────────────────────────
 //  "Up next" badge card (no fabricated progress — real name + hint only)
 // ─────────────────────────────────────────────────────────────────
@@ -507,6 +538,7 @@ class _NextBadgeCard extends StatelessWidget {
   final String hint;
   final VoidCallback? onTap;
   const _NextBadgeCard({required this.name, required this.hint, this.onTap});
+
 
   @override
   Widget build(BuildContext context) {
@@ -579,6 +611,7 @@ class _NextBadgeCard extends StatelessWidget {
   }
 }
 
+
 // ─────────────────────────────────────────────────────────────────
 //  Badge tile — earned shows the real award date, locked shows the
 //  real description instead of a fabricated progress bar
@@ -598,6 +631,7 @@ class _BadgeTile extends StatelessWidget {
     this.description,
     this.onTap,
   });
+
 
   @override
   Widget build(BuildContext context) {
@@ -715,6 +749,7 @@ class _BadgeTile extends StatelessWidget {
   }
 }
 
+
 // ─────────────────────────────────────────────────────────────────
 //  Certificate card — Save/Share are real, via CertificateViewerScreen
 // ─────────────────────────────────────────────────────────────────
@@ -723,10 +758,12 @@ class _CertCard extends StatelessWidget {
   final String fullName;
   const _CertCard({required this.cert, required this.fullName});
 
+
   String get _refLabel {
     final t = cert['reference_type'] as String? ?? 'Program';
     return t.isEmpty ? 'Program' : '${t[0].toUpperCase()}${t.substring(1)}';
   }
+
 
   void _open(BuildContext context, {CertAutoAction action = CertAutoAction.none}) {
     Navigator.push(
@@ -740,6 +777,7 @@ class _CertCard extends StatelessWidget {
       ),
     );
   }
+
 
   @override
   Widget build(BuildContext context) {
@@ -873,6 +911,7 @@ class _CertCard extends StatelessWidget {
     );
   }
 
+
   Widget _certAction(String label, IconData icon, Color fg, Color bg,
       VoidCallback onTap, {bool bordered = false}) {
     return GestureDetector(
@@ -901,6 +940,7 @@ class _CertCard extends StatelessWidget {
   }
 }
 
+
 // ─────────────────────────────────────────────────────────────────
 //  Trophy ring painter
 // ─────────────────────────────────────────────────────────────────
@@ -908,6 +948,7 @@ class _RingPainter extends CustomPainter {
   final double pct; // 0..1
   final Color color;
   _RingPainter(this.pct, this.color);
+
 
   @override
   void paint(Canvas canvas, Size size) {
@@ -935,9 +976,11 @@ class _RingPainter extends CustomPainter {
     );
   }
 
+
   @override
   bool shouldRepaint(_RingPainter old) => old.pct != pct || old.color != color;
 }
+
 
 // ─────────────────────────────────────────────────────────────────
 //  CERTIFICATE VIEWER SCREEN (unchanged capture/save/share logic from the
@@ -945,6 +988,7 @@ class _RingPainter extends CustomPainter {
 //  buttons can trigger it once the certificate has actually rendered)
 // ─────────────────────────────────────────────────────────────────
 enum CertAutoAction { none, save, share }
+
 
 class CertificateViewerScreen extends StatefulWidget {
   final Map<String, dynamic> cert;
@@ -959,29 +1003,131 @@ class CertificateViewerScreen extends StatefulWidget {
   @override State<CertificateViewerScreen> createState() => _CertificateViewerScreenState();
 }
 
+
 class _CertificateViewerScreenState extends State<CertificateViewerScreen> {
   final GlobalKey _repaintKey = GlobalKey();
   bool _saving = false;
 
+  // Design template chosen by the admin when issuing (certificate_templates).
+  // null = no template, so the built-in BLOOM design is shown.
+  Map<String, dynamic>? _tmpl;
+  double _tmplRatio = 842 / 595; // A4 landscape until the image size is known
+  String _seminarTitle = '';
+  bool _loadingTmpl = true;
+
+
   @override
   void initState() {
     super.initState();
-    if (widget.autoAction != CertAutoAction.none) {
-      // Wait for the first frame (so the RepaintBoundary actually has
-      // something painted to capture), plus a short buffer for the
-      // certificate's custom fonts to finish loading.
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        Future.delayed(const Duration(milliseconds: 400), () {
-          if (!mounted) return;
-          if (widget.autoAction == CertAutoAction.save) {
-            _saveToGallery();
-          } else if (widget.autoAction == CertAutoAction.share) {
-            _shareImage();
-          }
+    _loadTemplate().whenComplete(() {
+      if (!mounted) return;
+      setState(() => _loadingTmpl = false);
+      if (widget.autoAction != CertAutoAction.none) {
+        // Wait for the frame (so the RepaintBoundary has something painted
+        // to capture), plus a short buffer for fonts to finish loading.
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          Future.delayed(const Duration(milliseconds: 400), () {
+            if (!mounted) return;
+            if (widget.autoAction == CertAutoAction.save) {
+              _saveToGallery();
+            } else if (widget.autoAction == CertAutoAction.share) {
+              _shareImage();
+            }
+          });
         });
-      });
+      }
+    });
+  }
+
+
+  /// Loads the admin's design template (if the certificate has one), the
+  /// seminar title for {seminar_title} fields, and pre-loads the background
+  /// image so Save/Share never capture a half-loaded certificate.
+  /// Any failure just falls back to the built-in design.
+  Future<void> _loadTemplate() async {
+    final tid = widget.cert['template_id']?.toString();
+    if (tid == null || tid.isEmpty) return;
+    try {
+      final t = await _db
+          .from('certificate_templates')
+          .select('image_url, fields')
+          .eq('id', tid)
+          .maybeSingle();
+      if (t == null) return;
+      final fields = t['fields'];
+      if (fields is! List || fields.isEmpty) return;
+
+      if (widget.cert['reference_type'] == 'seminar' &&
+          widget.cert['reference_id'] != null) {
+        try {
+          final sem = await _db
+              .from('seminars')
+              .select('title')
+              .eq('id', widget.cert['reference_id'])
+              .maybeSingle();
+          _seminarTitle = sem?['title'] as String? ?? '';
+        } catch (_) {}
+      }
+
+      final url = (t['image_url'] as String?) ?? '';
+      if (url.isNotEmpty) {
+        final size = await _imageSize(url);
+        if (size != null && size.width > 0 && size.height > 0) {
+          _tmplRatio = size.width / size.height;
+        }
+        if (mounted) await precacheImage(NetworkImage(url), context);
+      }
+      _tmpl = Map<String, dynamic>.from(t);
+    } catch (e) {
+      debugPrint('[CertificateViewer] template load failed: ' + e.toString());
+      _tmpl = null;
     }
   }
+
+
+  Future<Size?> _imageSize(String url) {
+    final c = Completer<Size?>();
+    final stream = NetworkImage(url).resolve(const ImageConfiguration());
+    late ImageStreamListener l;
+    l = ImageStreamListener((info, _) {
+      if (!c.isCompleted) {
+        c.complete(Size(info.image.width.toDouble(), info.image.height.toDouble()));
+      }
+      stream.removeListener(l);
+    }, onError: (_, __) {
+      if (!c.isCompleted) c.complete(null);
+      stream.removeListener(l);
+    });
+    stream.addListener(l);
+    return c.future.timeout(const Duration(seconds: 15), onTimeout: () => null);
+  }
+
+
+  /// Same values the admin panel puts into a template's fields.
+  Map<String, String> get _templateData => {
+        'recipient_name': _recipientName,
+        'seminar_title': _seminarTitle,
+        'date': _issuedLong,
+        'cert_code': _code,
+        'sig1_name': _sig1Name,
+        'sig1_title': _sig1Title,
+        'sig2_name': _sig2Name,
+        'sig2_title': _sig2Title,
+        'body_text': _bodyText,
+      };
+
+
+  String get _issuedLong {
+    final iso = widget.cert['issued_at'] as String?;
+    if (iso == null) return '';
+    try {
+      final d = DateTime.parse(iso).toLocal();
+      const months = ['January','February','March','April','May','June','July',
+        'August','September','October','November','December'];
+      return months[d.month - 1] + ' ' + d.day.toString() + ', ' + d.year.toString();
+    } catch (_) { return ''; }
+  }
+
 
   String get _certTitle {
     final refType = widget.cert['reference_type'] as String? ?? 'manual';
@@ -999,12 +1145,14 @@ class _CertificateViewerScreenState extends State<CertificateViewerScreen> {
   String get _sig2Name  => widget.cert['sig2_name']  as String? ?? 'GADRC Director';
   String get _sig2Title => widget.cert['sig2_title'] as String? ?? 'Cavite State University';
 
+
   Color get _themeColor {
     final c = widget.cert['theme_color'] as String?;
     if (c == null) return AppColors.primary;
     try { return Color(int.parse(c.replaceFirst('#', '0xff'))); }
     catch (_) { return AppColors.primary; }
   }
+
 
   /// Capture the RepaintBoundary as a high-res PNG
   Future<Uint8List?> _capturePng() async {
@@ -1016,6 +1164,7 @@ class _CertificateViewerScreenState extends State<CertificateViewerScreen> {
     return byteData?.buffer.asUint8List();
   }
 
+
   /// Save certificate PNG to Android gallery
   Future<void> _saveToGallery() async {
     setState(() => _saving = true);
@@ -1023,8 +1172,10 @@ class _CertificateViewerScreenState extends State<CertificateViewerScreen> {
       final bytes = await _capturePng();
       if (bytes == null) throw Exception('Could not capture certificate.');
 
+
       final fileName =
           'BLOOM_GAD_${_code.replaceAll(RegExp(r'[^A-Za-z0-9]'), '_')}.png';
+
 
       // Write to temp file then save to gallery
       final dir  = await getTemporaryDirectory();
@@ -1032,8 +1183,10 @@ class _CertificateViewerScreenState extends State<CertificateViewerScreen> {
       await file.writeAsBytes(bytes);
       await Gal.putImage(file.path);
 
+
       // Clean up temp file
       await file.delete();
+
 
       if (mounted) _showSnack('✓ Certificate saved to gallery!', isSuccess: true);
     } catch (e) {
@@ -1043,18 +1196,22 @@ class _CertificateViewerScreenState extends State<CertificateViewerScreen> {
     }
   }
 
+
   /// Share certificate image via Android share sheet
   Future<void> _shareImage() async {
     try {
       final bytes = await _capturePng();
       if (bytes == null) throw Exception('Could not capture certificate.');
 
+
       final fileName =
           'BLOOM_GAD_${_code.replaceAll(RegExp(r'[^A-Za-z0-9]'), '_')}.png';
+
 
       final dir  = await getTemporaryDirectory();
       final file = File('${dir.path}/$fileName');
       await file.writeAsBytes(bytes);
+
 
       await SharePlus.instance.share(
         ShareParams(
@@ -1064,12 +1221,14 @@ class _CertificateViewerScreenState extends State<CertificateViewerScreen> {
         ),
       );
 
+
       // Clean up temp file after sharing
       await file.delete();
     } catch (e) {
       if (mounted) _showSnack('Error sharing: $e', isSuccess: false);
     }
   }
+
 
   void _showSnack(String msg, {required bool isSuccess}) {
     ScaffoldMessenger.of(context).showSnackBar(SnackBar(
@@ -1081,11 +1240,14 @@ class _CertificateViewerScreenState extends State<CertificateViewerScreen> {
     ));
   }
 
+
   @override
   Widget build(BuildContext context) {
     final screenW = MediaQuery.of(context).size.width;
     final certW   = screenW - 32;
-    final certH   = certW / 0.85;
+    final useTmpl = _tmpl != null;
+    final certH   = useTmpl ? certW / _tmplRatio : certW / 0.85;
+
 
     return Scaffold(
       backgroundColor: AppColors.primaryDark,
@@ -1131,13 +1293,23 @@ class _CertificateViewerScreenState extends State<CertificateViewerScreen> {
               key: _repaintKey,
               child: SizedBox(
                 width: certW, height: certH,
-                child: CertificateCard(
-                  certTitle: _certTitle, name: _recipientName,
-                  code: _code, issued: _issued, bodyText: _bodyText,
-                  sig1Name: _sig1Name, sig1Title: _sig1Title,
-                  sig2Name: _sig2Name, sig2Title: _sig2Title,
-                  themeColor: _themeColor,
-                ),
+                child: _loadingTmpl
+                    ? const Center(child: CircularProgressIndicator(color: Colors.white))
+                    : useTmpl
+                        ? TemplateCertificate(
+                            imageUrl: (_tmpl!['image_url'] as String?) ?? '',
+                            fields: List<dynamic>.from(_tmpl!['fields'] as List),
+                            data: _templateData,
+                            width: certW,
+                            height: certH,
+                          )
+                        : CertificateCard(
+                            certTitle: _certTitle, name: _recipientName,
+                            code: _code, issued: _issued, bodyText: _bodyText,
+                            sig1Name: _sig1Name, sig1Title: _sig1Title,
+                            sig2Name: _sig2Name, sig2Title: _sig2Title,
+                            themeColor: _themeColor,
+                          ),
               ),
             ),
           ),
@@ -1157,6 +1329,115 @@ class _CertificateViewerScreenState extends State<CertificateViewerScreen> {
   }
 }
 
+
+// ─────────────────────────────────────────────────────────────────
+//  TEMPLATE CERTIFICATE — draws the admin's design exactly like the
+//  admin panel: background image + text fields placed by % position.
+//  Font sizes are relative to an 842-px-wide page (same as the admin).
+// ─────────────────────────────────────────────────────────────────
+class TemplateCertificate extends StatelessWidget {
+  final String imageUrl;
+  final List<dynamic> fields;
+  final Map<String, String> data;
+  final double width, height;
+  const TemplateCertificate({
+    super.key,
+    required this.imageUrl,
+    required this.fields,
+    required this.data,
+    required this.width,
+    required this.height,
+  });
+
+  static const double _baseWidth = 842;
+
+  double _num(dynamic v, double fallback) =>
+      v is num ? v.toDouble() : double.tryParse(v.toString()) ?? fallback;
+
+  Color _color(dynamic hex) {
+    final h = (hex as String? ?? '#1A2E1A').replaceFirst('#', '');
+    try {
+      return Color(int.parse(h.length == 6 ? 'ff' + h : h, radix: 16));
+    } catch (_) {
+      return const Color(0xFF1A2E1A);
+    }
+  }
+
+  TextStyle _font(String family, TextStyle base) {
+    final f = family.toLowerCase();
+    if (f.contains('playfair')) return GoogleFonts.playfairDisplay(textStyle: base);
+    if (f.contains('inter')) return GoogleFonts.inter(textStyle: base);
+    if (f.contains('segoe') || f.contains('arial')) return GoogleFonts.arimo(textStyle: base);
+    if (f.contains('brush') || f.contains('cursive')) return GoogleFonts.greatVibes(textStyle: base);
+    if (f.contains('courier') || f.contains('monospace')) return GoogleFonts.cousine(textStyle: base);
+    return GoogleFonts.tinos(textStyle: base); // Georgia / Times New Roman
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final scale = width / _baseWidth;
+    return ClipRect(
+      child: Stack(children: [
+        Positioned.fill(
+          child: imageUrl.isNotEmpty
+              ? Image.network(imageUrl, fit: BoxFit.fill,
+                  errorBuilder: (_, __, ___) => Container(color: const Color(0xFFFAFDF6)))
+              : Container(
+                  decoration: BoxDecoration(
+                    color: const Color(0xFFFAFDF6),
+                    border: Border.all(color: AppColors.primary, width: 4),
+                  ),
+                ),
+        ),
+        for (final raw in fields)
+          if (raw is Map) _field(Map<String, dynamic>.from(raw), scale),
+      ]),
+    );
+  }
+
+  Widget _field(Map<String, dynamic> f, double scale) {
+    final variable = f['variable']?.toString() ?? '';
+    final value = variable == 'custom'
+        ? (f['customText']?.toString() ?? '')
+        : (data[variable] ?? '');
+    final align = f['textAlign']?.toString() ?? 'center';
+    final dx = align == 'center' ? -0.5 : align == 'right' ? -1.0 : 0.0;
+    final isBody = variable == 'body_text';
+
+    final style = _font(
+      f['fontFamily']?.toString() ?? 'Georgia, serif',
+      TextStyle(
+        fontSize: _num(f['fontSize'], 16) * scale,
+        color: _color(f['color']),
+        fontWeight: f['bold'] == true ? FontWeight.w700 : FontWeight.w400,
+        fontStyle: f['italic'] == true ? FontStyle.italic : FontStyle.normal,
+        height: 1.3,
+      ),
+    );
+
+    return Positioned(
+      left: _num(f['x'], 50) / 100 * width,
+      top: _num(f['y'], 50) / 100 * height,
+      child: FractionalTranslation(
+        translation: Offset(dx, -0.5),
+        child: ConstrainedBox(
+          constraints: BoxConstraints(maxWidth: _num(f['maxWidth'], 80) / 100 * width),
+          child: Text(
+            value,
+            softWrap: isBody,
+            overflow: TextOverflow.visible,
+            textAlign: align == 'left'
+                ? TextAlign.left
+                : align == 'right' ? TextAlign.right : TextAlign.center,
+            style: style,
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+
 // ─────────────────────────────────────────────────────────────────
 //  CERTIFICATE CARD (unchanged)
 // ─────────────────────────────────────────────────────────────────
@@ -1174,6 +1455,7 @@ class CertificateCard extends StatelessWidget {
     this.sig2Title = 'Cavite State University',
     this.themeColor = AppColors.primary,
   });
+
 
   @override
   Widget build(BuildContext context) {
@@ -1281,6 +1563,7 @@ class CertificateCard extends StatelessWidget {
     );
   }
 
+
   List<Widget> _corners() {
     const size = 16.0;
     return [
@@ -1291,6 +1574,7 @@ class CertificateCard extends StatelessWidget {
     ];
   }
 }
+
 
 class CertCorner extends StatelessWidget {
   final Color color;
@@ -1304,6 +1588,7 @@ class CertCorner extends StatelessWidget {
         child: CustomPaint(painter: CertCornerPainter(color))));
 }
 
+
 class CertCornerPainter extends CustomPainter {
   final Color color;
   const CertCornerPainter(this.color);
@@ -1315,6 +1600,7 @@ class CertCornerPainter extends CustomPainter {
   }
   @override bool shouldRepaint(_) => false;
 }
+
 
 class CertSignatureBlock extends StatelessWidget {
   final String title, sub;
@@ -1335,6 +1621,7 @@ class CertSignatureBlock extends StatelessWidget {
     ]);
 }
 
+
 // ─────────────────────────────────────────────────────────────────
 //  BADGE DETAIL SHEET — opens when a badge tile is tapped. Earned badges
 //  show the award date; locked badges show the real requirement(s) from
@@ -1350,12 +1637,15 @@ class _BadgeDetailSheet extends StatefulWidget {
     this.awardedAt,
   });
 
+
   @override
   State<_BadgeDetailSheet> createState() => _BadgeDetailSheetState();
 }
 
+
 class _BadgeDetailSheetState extends State<_BadgeDetailSheet> {
   List<BadgeRequirement>? _reqs;
+
 
   @override
   void initState() {
@@ -1370,6 +1660,7 @@ class _BadgeDetailSheetState extends State<_BadgeDetailSheet> {
     }
   }
 
+
   @override
   Widget build(BuildContext context) {
     final name = widget.badge['name'] as String? ?? 'Badge';
@@ -1377,11 +1668,13 @@ class _BadgeDetailSheetState extends State<_BadgeDetailSheet> {
     final iconUrl = widget.badge['icon_url'] as String?;
     final earned = widget.earned;
 
+
     final fallbackIcon = Icon(
       earned ? Icons.emoji_events_rounded : Icons.lock_rounded,
       size: 40,
       color: earned ? const Color(0xFFF59E0B) : AppColors.textLight,
     );
+
 
     return Container(
       decoration: const BoxDecoration(
@@ -1468,6 +1761,7 @@ class _BadgeDetailSheetState extends State<_BadgeDetailSheet> {
     );
   }
 
+
   Widget _requirements() {
     if (_reqs == null) {
       return const Padding(
@@ -1527,6 +1821,7 @@ class _BadgeDetailSheetState extends State<_BadgeDetailSheet> {
     );
   }
 }
+
 
 // ─────────────────────────────────────────────────────────────────
 //  EMPTY STATE
