@@ -1262,7 +1262,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
           )
         else
           SizedBox(
-            height: 132,
+            height: 150,
             child: ListView.separated(
               scrollDirection: Axis.horizontal,
               padding: const EdgeInsets.only(bottom: 4),
@@ -1891,6 +1891,7 @@ class ProfileBadgePreview extends StatelessWidget {
         padding: const EdgeInsets.all(10),
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
+          mainAxisSize: MainAxisSize.min,
           children: [
             Container(
               width: 48,
@@ -1928,6 +1929,8 @@ class ProfileBadgePreview extends StatelessWidget {
                     color: AppColors.primaryDark)),
             const SizedBox(height: 2),
             Text(date,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
                 style: GoogleFonts.nunito(fontSize: 9, color: AppColors.textLight)),
           ],
         ),

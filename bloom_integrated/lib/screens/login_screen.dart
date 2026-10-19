@@ -358,11 +358,16 @@ class _LoginScreenState extends State<LoginScreen> {
                   const Icon(Icons.verified_user_rounded,
                       color: Colors.white, size: 14),
                   const SizedBox(width: 6),
-                  Text('For CvSU & GADRC-registered participants',
-                      style: GoogleFonts.nunito(
-                          color:      Colors.white,
-                          fontSize:   11,
-                          fontWeight: FontWeight.w700)),
+                  Flexible(
+                    child: Text('For CvSU & GADRC-registered participants',
+                        maxLines: 2,
+                        textAlign: TextAlign.center,
+                        overflow: TextOverflow.ellipsis,
+                        style: GoogleFonts.nunito(
+                            color:      Colors.white,
+                            fontSize:   11,
+                            fontWeight: FontWeight.w700)),
+                  ),
                 ],
               ),
             ),

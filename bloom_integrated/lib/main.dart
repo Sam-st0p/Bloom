@@ -51,6 +51,19 @@ class BloomApp extends StatelessWidget {
         colorScheme: ColorScheme.fromSeed(seedColor: const Color(0xFF2E7D32)),
         useMaterial3: true,
       ),
+      // Phones with a large "Font size" / "Display size" setting can push
+      // text past its box (the yellow-black overflow stripes). Allow
+      // scaling, but cap it so layouts stay intact on every phone.
+      builder: (context, child) {
+        final mq = MediaQuery.of(context);
+        return MediaQuery(
+          data: mq.copyWith(
+            textScaler: mq.textScaler
+                .clamp(minScaleFactor: 0.9, maxScaleFactor: 1.15),
+          ),
+          child: child ?? const SizedBox.shrink(),
+        );
+      },
       home: const AuthGate(),
     );
   }
