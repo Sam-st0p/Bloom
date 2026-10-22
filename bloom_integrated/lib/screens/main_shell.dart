@@ -1,8 +1,11 @@
 // lib/screens/main_shell.dart
 
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 import '../theme/app_theme.dart';
+import '../services/connectivity_service.dart';
+import '../widgets/common_widgets.dart';
 import 'home_screen.dart';
 import 'library_screen.dart';
 import 'events_screen.dart';
@@ -24,7 +27,7 @@ class MainShell extends StatefulWidget {
   const MainShell({
     super.key,
     required this.onSignOut,
-    this.resolvedRole = '',   // empty = HomeScreen fetches it normally
+    this.resolvedRole = '', // empty = HomeScreen fetches it normally
   });
 
   @override
@@ -36,6 +39,9 @@ class _MainShellState extends State<MainShell> {
   int _eventsInitialTab = 0;
   int _badgesInitialTab = 0;
 
+  bool _online = true;
+  StreamSubscription<bool>? _connSub;
+
   final _notifProvider = NotificationProvider();
 
   @override
@@ -43,10 +49,21 @@ class _MainShellState extends State<MainShell> {
     super.initState();
     _notifProvider.init();
     _notifProvider.addListener(_onProviderChange);
+
+    // Initial connectivity check
+    ConnectivityService.instance.hasInternet().then((v) {
+      if (mounted) setState(() => _online = v);
+    });
+
+    // Live updates (airplane mode on/off, wifi drops, etc.)
+    _connSub = ConnectivityService.instance.onStatusChange.listen((v) {
+      if (mounted) setState(() => _online = v);
+    });
   }
 
   @override
   void dispose() {
+    _connSub?.cancel();
     _notifProvider.removeListener(_onProviderChange);
     _notifProvider.dispose();
     super.dispose();
@@ -77,19 +94,31 @@ class _MainShellState extends State<MainShell> {
       if (result == null) return;
       switch (result) {
         case NavResult.library:
-          setState(() { _currentIndex = 1; });
+          setState(() => _currentIndex = 1);
           break;
         case NavResult.events:
-          setState(() { _eventsInitialTab = 0; _currentIndex = 2; });
+          setState(() {
+            _eventsInitialTab = 0;
+            _currentIndex = 2;
+          });
           break;
         case NavResult.calendar:
-          setState(() { _eventsInitialTab = 1; _currentIndex = 2; });
+          setState(() {
+            _eventsInitialTab = 1;
+            _currentIndex = 2;
+          });
           break;
         case NavResult.achievements:
-          setState(() { _badgesInitialTab = 0; _currentIndex = 3; });
+          setState(() {
+            _badgesInitialTab = 0;
+            _currentIndex = 3;
+          });
           break;
         case NavResult.certificates:
-          setState(() { _badgesInitialTab = 1; _currentIndex = 3; });
+          setState(() {
+            _badgesInitialTab = 1;
+            _currentIndex = 3;
+          });
           break;
       }
     });
@@ -101,14 +130,14 @@ class _MainShellState extends State<MainShell> {
 
     final screens = [
       HomeScreen(
-        onSwitchTab:         _navigateTo,
+        onSwitchTab: _navigateTo,
         onOpenNotifications: _openNotifications,
-        unreadCount:         unreadCount,
-        resolvedRole:        widget.resolvedRole,   // ← passed in, no extra query
+        unreadCount: unreadCount,
+        resolvedRole: widget.resolvedRole, // passed in, no extra query
         onJoinLive: (seminar) {
           setState(() {
             _eventsInitialTab = 0;
-            _currentIndex     = 2;
+            _currentIndex = 2;
           });
         },
         onOpenCalendar: () {
@@ -116,7 +145,7 @@ class _MainShellState extends State<MainShell> {
           // until a real Forum tab exists.
           setState(() {
             _eventsInitialTab = 1;
-            _currentIndex     = 2;
+            _currentIndex = 2;
           });
         },
       ),
@@ -129,16 +158,21 @@ class _MainShellState extends State<MainShell> {
     return NotificationProviderWidget(
       provider: _notifProvider,
       child: Scaffold(
-        body: screens[_currentIndex],
+        body: Column(
+          children: [
+            Expanded(child: screens[_currentIndex]),
+            if (!_online) const OfflineBanner(),
+          ],
+        ),
         bottomNavigationBar: Container(
           decoration: BoxDecoration(
             color: Colors.white,
             border: const Border(top: BorderSide(color: AppColors.border)),
             boxShadow: [
               BoxShadow(
-                color:      Colors.black.withValues(alpha: 0.05),
+                color: Colors.black.withValues(alpha: 0.05),
                 blurRadius: 10,
-                offset:     const Offset(0, -4),
+                offset: const Offset(0, -4),
               ),
             ],
           ),
@@ -147,11 +181,11 @@ class _MainShellState extends State<MainShell> {
               height: 64,
               child: Row(
                 children: [
-                  _NavItem(icon: Icons.home_outlined,           activeIcon: Icons.home_rounded,           label: 'Home',        index: 0, currentIndex: _currentIndex, onTap: _navigateTo),
-                  _NavItem(icon: Icons.menu_book_outlined,      activeIcon: Icons.menu_book_rounded,      label: 'Library',     index: 1, currentIndex: _currentIndex, onTap: _navigateTo),
-                  _NavItem(icon: Icons.calendar_today_outlined, activeIcon: Icons.calendar_today_rounded, label: 'Events',      index: 2, currentIndex: _currentIndex, onTap: _navigateTo),
-                  _NavItem(icon: Icons.emoji_events_outlined,   activeIcon: Icons.emoji_events_rounded,   label: 'Achievement', index: 3, currentIndex: _currentIndex, onTap: _navigateTo),
-                  _NavItem(icon: Icons.person_outline_rounded,  activeIcon: Icons.person_rounded,         label: 'Profile',     index: 4, currentIndex: _currentIndex, onTap: _navigateTo),
+                  _NavItem(icon: Icons.home_outlined, activeIcon: Icons.home_rounded, label: 'Home', index: 0, currentIndex: _currentIndex, onTap: _navigateTo),
+                  _NavItem(icon: Icons.menu_book_outlined, activeIcon: Icons.menu_book_rounded, label: 'Library', index: 1, currentIndex: _currentIndex, onTap: _navigateTo),
+                  _NavItem(icon: Icons.calendar_today_outlined, activeIcon: Icons.calendar_today_rounded, label: 'Events', index: 2, currentIndex: _currentIndex, onTap: _navigateTo),
+                  _NavItem(icon: Icons.emoji_events_outlined, activeIcon: Icons.emoji_events_rounded, label: 'Achievement', index: 3, currentIndex: _currentIndex, onTap: _navigateTo),
+                  _NavItem(icon: Icons.person_outline_rounded, activeIcon: Icons.person_rounded, label: 'Profile', index: 4, currentIndex: _currentIndex, onTap: _navigateTo),
                 ],
               ),
             ),
@@ -163,9 +197,9 @@ class _MainShellState extends State<MainShell> {
 }
 
 class _NavItem extends StatelessWidget {
-  final IconData           icon, activeIcon;
-  final String             label;
-  final int                index, currentIndex;
+  final IconData icon, activeIcon;
+  final String label;
+  final int index, currentIndex;
   final void Function(int) onTap;
 
   const _NavItem({
@@ -190,22 +224,22 @@ class _NavItem extends StatelessWidget {
             Icon(
               active ? activeIcon : icon,
               color: active ? AppColors.primary : AppColors.textLight,
-              size:  22,
+              size: 22,
             ),
             const SizedBox(height: 3),
             Text(
               label,
               style: GoogleFonts.nunito(
-                fontSize:      10,
-                fontWeight:    FontWeight.w700,
-                color:         active ? AppColors.primary : AppColors.textLight,
+                fontSize: 10,
+                fontWeight: FontWeight.w700,
+                color: active ? AppColors.primary : AppColors.textLight,
                 letterSpacing: 0.2,
               ),
             ),
             const SizedBox(height: 3),
             if (active)
               Container(
-                width:  4,
+                width: 4,
                 height: 4,
                 decoration: const BoxDecoration(
                   color: AppColors.primary,

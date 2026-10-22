@@ -1,5 +1,7 @@
-import 'dart:convert';
 // lib/screens/library_screen.dart
+
+import 'dart:async';
+import 'dart:convert';
 
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
@@ -10,8 +12,10 @@ import '../theme/app_theme.dart';
 import '../models/models.dart';
 import '../widgets/common_widgets.dart';
 import '../services/activity_service.dart';
-import 'assessment_screen.dart';
 import '../services/badge_service.dart';
+import '../services/connectivity_service.dart';
+import '../utils/error_handler.dart';
+import 'assessment_screen.dart';
 
 final _supabase = Supabase.instance.client;
 
@@ -74,9 +78,14 @@ class _LibraryScreenState extends State<LibraryScreen> {
   int    _page        = 0;
   static const int _pageSize = 10;
 
+  // File-open progress: +20% per file, capped at 80% so that finishing
+  // the module (assessment pass / PDF completion) is what reaches 100%.
+  static const int _fileOpenStep = 20;
+  static const int _fileOpenCap  = 80;
+  final Set<String> _countedFileIds = {};
+
   _LibraryFilters _filters = const _LibraryFilters();
 
-  List<ModuleModel> _continueModules = [];
   int  _completedTotal  = 0;
   int  _inProgressTotal = 0;
   int  _badgeCount       = 0;
@@ -105,9 +114,6 @@ class _LibraryScreenState extends State<LibraryScreen> {
     authors.sort();
     return authors;
   }
-
-  bool get _railVisible =>
-      !_filters.hasActiveFilters && _search.isEmpty && _continueModules.isNotEmpty;
 
   @override
   void initState() {
@@ -173,7 +179,10 @@ class _LibraryScreenState extends State<LibraryScreen> {
         }
       }
     } catch (e) {
-      if (mounted) setState(() => _loading = false);
+      if (mounted) {
+        setState(() => _loading = false);
+        AppErrors.show(context, e);
+      }
     }
   }
 
@@ -254,26 +263,11 @@ class _LibraryScreenState extends State<LibraryScreen> {
           .select('id')
           .eq('user_id', userId);
 
-      final continueModules = <ModuleModel>[];
-      for (final r in (inProgressRows as List).take(5)) {
-        final mid = r['module_id'].toString();
-        final raw = await _supabase
-            .from('modules')
-            .select('*, categories(name), author, published_date, tags')
-            .eq('id', mid)
-            .maybeSingle();
-        if (raw != null) {
-          final pct = (r['progress_percent'] as num?)?.toInt() ?? 0;
-          continueModules.add(ModuleModel.fromMap(raw, progress: pct));
-        }
-      }
-
       if (mounted) {
         setState(() {
           _completedTotal   = (completedRows as List).length;
           _inProgressTotal  = inProgressRows.length;
           _badgeCount        = (badgesData as List).length;
-          _continueModules   = continueModules;
           _statsLoading      = false;
         });
       }
@@ -283,11 +277,17 @@ class _LibraryScreenState extends State<LibraryScreen> {
   }
 
   Future<void> _handleOpen(ModuleModel module) async {
-    final raw = await _supabase
-        .from('modules')
-        .select('author, published_date, tags')
-        .eq('id', module.id)
-        .maybeSingle();
+    Map<String, dynamic>? raw;
+    try {
+      raw = await _supabase
+          .from('modules')
+          .select('author, published_date, tags')
+          .eq('id', module.id)
+          .maybeSingle();
+    } catch (_) {
+      // Offline: open the module anyway with the data we already have.
+    }
+    if (!mounted) return;
     _openModule(module, raw ?? {});
   }
 
@@ -327,7 +327,65 @@ class _LibraryScreenState extends State<LibraryScreen> {
         });
       }
     } catch (e) {
-      if (mounted) setState(() => _loadingFiles = false);
+      if (mounted) {
+        setState(() => _loadingFiles = false);
+        AppErrors.show(context, e);
+      }
+    }
+  }
+
+  ModuleModel _withProgress(ModuleModel m, int pct) => ModuleModel(
+        id:            m.id,
+        title:         m.title,
+        category:      m.category,
+        progress:      pct,
+        status:        m.status,
+        colorValue:    m.colorValue,
+        pages:         m.pages,
+        hasBadge:      pct == 100,
+        description:   m.description,
+        author:        m.author,
+        publishedDate: m.publishedDate,
+        tags:          m.tags,
+      );
+
+  /// Opening a file adds 20% to the module's progress (once per file per
+  /// session, never past 80%, never touching a completed module).
+  Future<void> _bumpProgressOnFileOpen(String moduleId, String fileKey) async {
+    final key = '$moduleId:$fileKey';
+    if (!_countedFileIds.add(key)) return;
+
+    final userId = _supabase.auth.currentUser?.id;
+    if (userId == null) return;
+
+    final current = _progressMap[moduleId] ?? 0;
+    if (current >= _fileOpenCap) return;
+    final next = current + _fileOpenStep > _fileOpenCap
+        ? _fileOpenCap
+        : current + _fileOpenStep;
+
+    try {
+      await _supabase.from('module_progress').upsert({
+        'user_id':          userId,
+        'module_id':        moduleId,
+        'progress_percent': next,
+        'status':           'in_progress',
+        'last_accessed_at': DateTime.now().toUtc().toIso8601String(),
+      }, onConflict: 'user_id,module_id');
+
+      if (!mounted) return;
+      setState(() {
+        _progressMap[moduleId] = next;
+        _modules = _modules
+            .map((m) => m.id == moduleId ? _withProgress(m, next) : m)
+            .toList();
+        if (_selectedModule?.id == moduleId) {
+          _selectedModule = _withProgress(_selectedModule!, next);
+        }
+      });
+      _loadStats(); // refresh header counters
+    } catch (_) {
+      _countedFileIds.remove(key); // failed (e.g. offline): allow a retry
     }
   }
 
@@ -336,6 +394,9 @@ class _LibraryScreenState extends State<LibraryScreen> {
   // (image preview, or a file-info card for video/PPTX/DOCX/etc).
   // Both viewers expose the same download icon button in their app bar.
   Future<void> _openFile(Map<String, dynamic> file) async {
+    final moduleId = (file['module_id'] ?? _selectedModule?.id)?.toString();
+    final fileKey  = (file['id'] ?? file['file_name'] ?? file['file_url'] ?? 'file').toString();
+
     final lesson = LessonContent.fromFile(file);
     if (lesson != null) {
       await ActivityService.log(
@@ -345,6 +406,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
         metadata: {'file_name': lesson.title, 'module_id': file['module_id']},
       );
       if (!mounted) return;
+      if (moduleId != null) unawaited(_bumpProgressOnFileOpen(moduleId, fileKey));
       Navigator.push(context, MaterialPageRoute(
         builder: (_) => _LessonReaderScreen(
           lesson: lesson,
@@ -376,6 +438,8 @@ class _LibraryScreenState extends State<LibraryScreen> {
     );
 
     if (!mounted) return;
+
+    if (moduleId != null) unawaited(_bumpProgressOnFileOpen(moduleId, fileKey));
 
     if (isPdf) {
       Navigator.push(context, MaterialPageRoute(
@@ -483,6 +547,17 @@ class _LibraryScreenState extends State<LibraryScreen> {
     }
   }
 
+  /// Pull-to-refresh. Offline → shows "Unable to connect. Check your
+  /// internet." instead of failing silently (BLOOM-M-ERR-01).
+  Future<void> _onPullToRefresh() async {
+    if (!await ConnectivityService.instance.hasInternet()) {
+      if (mounted) AppErrors.show(context, TimeoutException('offline'));
+      return;
+    }
+    await _load();
+    await _loadStats();
+  }
+
   @override
   Widget build(BuildContext context) {
     if (_selectedModule != null) return _buildModuleDetail(_selectedModule!);
@@ -497,17 +572,13 @@ class _LibraryScreenState extends State<LibraryScreen> {
           child: _loading
               ? const Center(child: CircularProgressIndicator(color: AppColors.primary))
               : RefreshIndicator(
-                  onRefresh: () async {
-                    await _load();
-                    await _loadStats();
-                  },
+                  onRefresh: _onPullToRefresh,
                   child: SingleChildScrollView(
                     controller: _scrollController,
                     physics: const AlwaysScrollableScrollPhysics(),
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.stretch,
                       children: [
-                        if (_railVisible) _continueRail(),
                         _statusBar(),
                         _categoryBar(),
                         if (_filters.author != null ||
@@ -716,34 +787,6 @@ class _LibraryScreenState extends State<LibraryScreen> {
           ]),
         ),
       ]),
-    );
-  }
-
-  Widget _continueRail() {
-    return Padding(
-      padding: const EdgeInsets.only(top: 16),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          const Padding(
-            padding: EdgeInsets.fromLTRB(16, 0, 16, 10),
-            child: _RailTitle('Pick up where you left off'),
-          ),
-          SizedBox(
-            height: 132,
-            child: ListView.separated(
-              scrollDirection: Axis.horizontal,
-              padding: const EdgeInsets.symmetric(horizontal: 16),
-              itemCount: _continueModules.take(5).length,
-              separatorBuilder: (_, __) => const SizedBox(width: 12),
-              itemBuilder: (_, i) => _ResumeCard(
-                module: _continueModules[i],
-                onTap: () => _handleOpen(_continueModules[i]),
-              ),
-            ),
-          ),
-        ],
-      ),
     );
   }
 
@@ -1124,122 +1167,6 @@ class _LibraryScreenState extends State<LibraryScreen> {
     } catch (_) {
       return iso;
     }
-  }
-}
-
-class _RailTitle extends StatelessWidget {
-  final String text;
-  const _RailTitle(this.text);
-  @override
-  Widget build(BuildContext context) => Text(text,
-      style: GoogleFonts.nunito(
-          fontSize: 14, fontWeight: FontWeight.w800, color: AppColors.textDark));
-}
-
-class _ResumeCard extends StatelessWidget {
-  final ModuleModel module;
-  final VoidCallback onTap;
-  const _ResumeCard({required this.module, required this.onTap});
-
-  @override
-  Widget build(BuildContext context) {
-    return GestureDetector(
-      onTap: onTap,
-      child: Container(
-        width: 220,
-        decoration: BoxDecoration(
-          color: AppColors.card,
-          borderRadius: BorderRadius.circular(16),
-          boxShadow: [
-            BoxShadow(
-              color: Colors.black.withValues(alpha: 0.06),
-              blurRadius: 8,
-              offset: const Offset(0, 2),
-            ),
-          ],
-        ),
-        clipBehavior: Clip.antiAlias,
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Container(
-              padding: const EdgeInsets.all(12),
-              decoration: const BoxDecoration(
-                gradient: LinearGradient(
-                  begin: Alignment.topLeft,
-                  end: Alignment.bottomRight,
-                  colors: [AppColors.primaryDark, AppColors.primary],
-                ),
-              ),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Container(
-                    padding:
-                        const EdgeInsets.symmetric(horizontal: 10, vertical: 3),
-                    decoration: BoxDecoration(
-                      color: Colors.white.withValues(alpha: 0.22),
-                      borderRadius: BorderRadius.circular(20),
-                    ),
-                    child: Text(module.category,
-                        style: GoogleFonts.nunito(
-                          color: Colors.white,
-                          fontSize: 11,
-                          fontWeight: FontWeight.w800,
-                        )),
-                  ),
-                  const SizedBox(height: 8),
-                  SizedBox(
-                    height: 34,
-                    child: Text(module.title,
-                        maxLines: 2,
-                        overflow: TextOverflow.ellipsis,
-                        style: GoogleFonts.nunito(
-                          color: Colors.white,
-                          fontSize: 13,
-                          fontWeight: FontWeight.w800,
-                          height: 1.3,
-                        )),
-                  ),
-                ],
-              ),
-            ),
-            Padding(
-              padding: const EdgeInsets.all(12),
-              child: Column(
-                children: [
-                  AppProgressBar(value: module.progress, color: AppColors.accent),
-                  const SizedBox(height: 6),
-                  Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                    children: [
-                      Text('${module.progress}% complete',
-                          style: GoogleFonts.nunito(
-                            fontSize: 10,
-                            fontWeight: FontWeight.w600,
-                            color: AppColors.textLight,
-                          )),
-                      Row(
-                        children: [
-                          Text('Resume',
-                              style: GoogleFonts.nunito(
-                                fontSize: 11,
-                                fontWeight: FontWeight.w800,
-                                color: AppColors.primary,
-                              )),
-                          const Icon(Icons.play_arrow_rounded,
-                              color: AppColors.primary, size: 13),
-                        ],
-                      ),
-                    ],
-                  ),
-                ],
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
   }
 }
 

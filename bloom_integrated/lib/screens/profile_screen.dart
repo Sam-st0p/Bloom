@@ -88,6 +88,13 @@ String? _validateStudentId(String? v) {
 
 String _sanitizeName(String v) => v.trim().replaceAll(RegExp(r'\s+'), ' ');
 
+/// Returns 'male' / 'female', or null if the value is missing or unknown.
+/// Same two values the signup screen saves.
+String? _normalizeSex(dynamic v) {
+  final s = (v?.toString() ?? '').trim().toLowerCase();
+  return (s == 'male' || s == 'female') ? s : null;
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 //  DATE FORMATTER
 // ─────────────────────────────────────────────────────────────────────────────
@@ -163,12 +170,16 @@ class _ProfileScreenState extends State<ProfileScreen> {
   String? _studentIdError;
   String? _deptError;
   String? _courseError;
+  bool    _sexError = false;
 
   // ── Role / academic state ──────────────────────────────────────────────────
   String? _selectedRole;
   String? _selectedDept;
   String? _selectedCourse;
   String  _selectedYear = '1st Year';
+
+  // ── Sex ('male' | 'female') — for GAD sex-disaggregated reports ───────────
+  String? _selectedSex;
 
   @override
   void initState() { super.initState(); _load(); }
@@ -200,6 +211,17 @@ class _ProfileScreenState extends State<ProfileScreen> {
     return r.isEmpty ? '' : r[0].toUpperCase() + r.substring(1);
   }
 
+  /// The sex saved on the profile, shown in the profile header.
+  String get _sexLabel {
+    final s = _normalizeSex(_profileData?['sex']);
+    if (s == null) return '';
+    return s[0].toUpperCase() + s.substring(1);
+  }
+
+  /// Sex is set once and then locked (same idea as Role). It is locked as
+  /// soon as the saved profile already has a value.
+  bool get _sexLocked => _normalizeSex(_profileData?['sex']) != null;
+
   String get _joinedDate =>
       _fmtDate(_profileData?['created_at'] as String?);
 
@@ -220,7 +242,8 @@ class _ProfileScreenState extends State<ProfileScreen> {
         _studentIdCtrl.text.trim() !=
             (_profileData?['student_id'] as String? ?? '') ||
         _selectedDept   != (_profileData?['department'] as String?) ||
-        _selectedCourse != (_profileData?['course']     as String?);
+        _selectedCourse != (_profileData?['course']     as String?) ||
+        _selectedSex    != _normalizeSex(_profileData?['sex']);
   }
 
   // ── New-view helpers (real data, not placeholders) ─────────────────────────
@@ -249,6 +272,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
     final checks = <bool>[
       _displayName.isNotEmpty,
       (_avatarUrl ?? '').isNotEmpty,
+      _normalizeSex(_profileData?['sex']) != null,
     ];
     if (role == 'student') {
       checks.addAll([
@@ -270,6 +294,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
     final missing = <String>[];
     if (_displayName.isEmpty) missing.add('your name');
     if ((_avatarUrl ?? '').isEmpty) missing.add('a profile photo');
+    if (_normalizeSex(_profileData?['sex']) == null) missing.add('your sex');
     if (role == 'student') {
       if ((_profileData?['student_id'] as String? ?? '').isEmpty) {
         missing.add('your student ID');
@@ -399,6 +424,8 @@ class _ProfileScreenState extends State<ProfileScreen> {
           _studentIdCtrl.text = profile?['student_id'] as String? ?? '';
 
           _selectedRole = profile?['role'] as String?;
+          _selectedSex  = _normalizeSex(profile?['sex']);
+          _sexError     = false;
           _selectedDept = (savedDept != null &&
               kCvsuDeptCourses.containsKey(savedDept)) ? savedDept : null;
           _selectedCourse = (_selectedDept != null &&
@@ -469,6 +496,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
   bool _validateAll() {
     final fnErr  = _validateName(_firstNameCtrl.text, 'First name');
     final lnErr  = _validateName(_lastNameCtrl.text,  'Last name');
+    final sexErr = !_sexLocked && _selectedSex == null;
 
     String? sidErr;
     String? deptErr;
@@ -488,10 +516,12 @@ class _ProfileScreenState extends State<ProfileScreen> {
       _studentIdError = sidErr;
       _deptError      = deptErr;
       _courseError    = courseErr;
+      _sexError       = sexErr;
     });
 
     return fnErr     == null &&
            lnErr     == null &&
+           !sexErr           &&
            sidErr    == null &&
            deptErr   == null &&
            courseErr == null;
@@ -596,8 +626,12 @@ class _ProfileScreenState extends State<ProfileScreen> {
             style: GoogleFonts.poppins(
                 fontWeight: FontWeight.w700, color: AppColors.textDark)),
         content: Text(
-          'Are you sure you want to save your profile changes?',
-          style: GoogleFonts.poppins(fontSize: 13, color: AppColors.textMid)),
+          (!_sexLocked && _selectedSex != null)
+              ? "Are you sure you want to save your profile changes?\n\n"
+                "Your sex (${_selectedSex![0].toUpperCase()}${_selectedSex!.substring(1)}) "
+                "can't be changed after saving."
+              : 'Are you sure you want to save your profile changes?',
+          style: GoogleFonts.poppins(fontSize: 13, color: AppColors.textMid, height: 1.5)),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(ctx, false),
@@ -637,6 +671,12 @@ class _ProfileScreenState extends State<ProfileScreen> {
         'full_name':  fullName,
         'updated_at': DateTime.now().toUtc().toIso8601String(),
       };
+
+      // Sex is saved only the first time. Once set it is locked and is
+      // never sent again, so it can't be changed from the app.
+      if (!_sexLocked && _selectedSex != null) {
+        payload['sex'] = _selectedSex;
+      }
 
       if (_isStudent) {
         payload['student_id'] = _studentIdCtrl.text.trim();
@@ -942,7 +982,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
                       const SizedBox(height: 18),
                       _menuGroup('Account', [
                         _MenuItem(Icons.person_outline_rounded, 'Edit profile',
-                            'Name, course, year level',
+                            'Name, sex, course, year level',
                             () => setState(() => _editOpen = true)),
                       ]),
                       const SizedBox(height: 18),
@@ -1053,6 +1093,12 @@ class _ProfileScreenState extends State<ProfileScreen> {
                       if (_metaSecondaryLabel.isNotEmpty)
                         _metaChip(Icons.school_outlined, _metaSecondaryLabel,
                             maxWidth: constraints.maxWidth - 32),
+                      if (_sexLabel.isNotEmpty)
+                        _metaChip(
+                            _sexLabel == 'Female'
+                                ? Icons.female_rounded
+                                : Icons.male_rounded,
+                            _sexLabel),
                       _metaChip(
                           Icons.calendar_today_outlined, 'Joined $_joinedDate'),
                     ],
@@ -1377,6 +1423,43 @@ class _ProfileScreenState extends State<ProfileScreen> {
     );
   }
 
+  // ── Sex option button (Female / Male) ─────────────────────────────────────
+  Widget _sexOption(String value, String label, IconData icon) {
+    final selected = _selectedSex == value;
+    return GestureDetector(
+      onTap: () => setState(() {
+        _selectedSex = value;
+        _sexError    = false;
+      }),
+      child: Container(
+        padding: const EdgeInsets.symmetric(vertical: 13),
+        decoration: BoxDecoration(
+          color: selected
+              ? AppColors.primary.withValues(alpha: 0.08)
+              : AppColors.background,
+          borderRadius: BorderRadius.circular(12),
+          border: Border.all(
+            color: selected
+                ? AppColors.primary
+                : (_sexError ? AppColors.danger : AppColors.border),
+            width: selected ? 2 : 1,
+          ),
+        ),
+        child: Row(mainAxisAlignment: MainAxisAlignment.center, children: [
+          Icon(icon,
+              size: 18,
+              color: selected ? AppColors.primary : AppColors.textLight),
+          const SizedBox(width: 6),
+          Text(label,
+              style: GoogleFonts.poppins(
+                  fontSize: 14,
+                  fontWeight: FontWeight.w600,
+                  color: selected ? AppColors.primary : AppColors.textMid)),
+        ]),
+      ),
+    );
+  }
+
   // ── EDIT PROFILE ───────────────────────────────────────────────────────────
   Widget _buildEditProfile() {
     final deptCourseList = _selectedDept != null
@@ -1466,6 +1549,64 @@ class _ProfileScreenState extends State<ProfileScreen> {
                           _studentIdError =
                               _validateStudentId(_studentIdCtrl.text)),
                     ),
+                  ],
+                ],
+              )),
+              const SizedBox(height: 12),
+
+              // ── Sex (set once, then locked — like Role) ────────────
+              AppCard(child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  _sectionLabel(_sexLocked ? 'Sex' : 'Sex *'),
+                  const SizedBox(height: 4),
+                  Text(
+                    _sexLocked
+                        ? 'Your sex is saved on your profile and cannot be changed here.'
+                        : 'Choose carefully — once saved, it cannot be changed. '
+                          'Used only for GAD sex-disaggregated reports.',
+                    style: GoogleFonts.poppins(
+                        fontSize: 11, color: AppColors.textLight),
+                  ),
+                  const SizedBox(height: 12),
+                  if (_sexLocked)
+                    Container(
+                      width: double.infinity,
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 16, vertical: 12),
+                      decoration: BoxDecoration(
+                        color: AppColors.background,
+                        borderRadius: BorderRadius.circular(10),
+                        border: Border.all(color: AppColors.border),
+                      ),
+                      child: Row(children: [
+                        Icon(
+                          _sexLabel == 'Female'
+                              ? Icons.female_rounded
+                              : Icons.male_rounded,
+                          color: AppColors.textMid, size: 18),
+                        const SizedBox(width: 10),
+                        Text(_sexLabel,
+                            style: GoogleFonts.poppins(
+                                fontWeight: FontWeight.w700,
+                                fontSize: 14,
+                                color: AppColors.textDark)),
+                      ]),
+                    )
+                  else ...[
+                    Row(children: [
+                      Expanded(child: _sexOption(
+                          'female', 'Female', Icons.female_rounded)),
+                      const SizedBox(width: 10),
+                      Expanded(child: _sexOption(
+                          'male', 'Male', Icons.male_rounded)),
+                    ]),
+                    if (_sexError) ...[
+                      const SizedBox(height: 8),
+                      Text('Please select your sex.',
+                          style: GoogleFonts.poppins(
+                              fontSize: 11, color: AppColors.danger)),
+                    ],
                   ],
                 ],
               )),

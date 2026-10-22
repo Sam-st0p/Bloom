@@ -7,6 +7,7 @@ import '../theme/app_theme.dart';
 import '../models/models.dart';
 import '../widgets/common_widgets.dart';
 import '../services/activity_service.dart';
+import '../utils/error_handler.dart';
 
 class LiveSeminar {
   final String id;
@@ -167,7 +168,11 @@ class _HomeScreenState extends State<HomeScreen> {
       });
     } catch (e, st) {
       debugPrint('HomeScreen._loadAll failed: $e\n$st');
-      if (mounted) setState(() => _loading = false);
+      if (mounted) {
+        setState(() => _loading = false);
+        // e.g. "Unable to connect. Check your internet." when offline
+        AppErrors.show(context, e);
+      }
     }
   }
 
@@ -927,6 +932,7 @@ class _EventCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final color = Color(event.colorValue);
+    final dateText = event.dateLabel.isNotEmpty ? event.dateLabel : event.date;
     return GestureDetector(
       onTap: onTap,
       child: Container(
@@ -956,12 +962,16 @@ class _EventCard extends StatelessWidget {
                     children: [
                       Icon(Icons.calendar_today_rounded, color: color, size: 14),
                       const SizedBox(width: 6),
-                      Text(
-                        event.date,
-                        style: GoogleFonts.nunito(
-                          color: color,
-                          fontSize: 12,
-                          fontWeight: FontWeight.w900,
+                      Expanded(
+                        child: Text(
+                          dateText,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: GoogleFonts.nunito(
+                            color: color,
+                            fontSize: 12,
+                            fontWeight: FontWeight.w900,
+                          ),
                         ),
                       ),
                     ],

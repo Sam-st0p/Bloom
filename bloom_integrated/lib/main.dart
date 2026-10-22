@@ -7,36 +7,48 @@
 //     This covers CvSU students/staff (@cvsu.edu.ph) AND outsiders the
 //     GADRC admin added (e.g. Gmail). Anyone else is signed out.
 //   • The role always comes from the masterlist (no more "force guest").
+//
+// Offline behaviour (BLOOM-M-ERR-01):
+//   • The app never crashes when launched or used without internet.
+//   • If startup can't reach Supabase, a friendly offline screen with a
+//     Retry button is shown instead of a crash or endless spinner.
+//   • A user who is already signed in is NOT signed out just because the
+//     network dropped.
 
 import 'dart:async';
 import 'package:app_links/app_links.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:google_fonts/google_fonts.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
 import 'theme/app_theme.dart';
 import 'services/auth_service.dart';
+import 'utils/error_handler.dart';
 import 'screens/login_screen.dart';
 import 'screens/signup_screen.dart';
 import 'screens/otp_screen.dart';
 import 'screens/reset_password_screen.dart';
 import 'screens/main_shell.dart';
 
-Future<void> main() async {
-  WidgetsFlutterBinding.ensureInitialized();
+const String _supabaseUrl = 'https://vfpgzuehfebhawlidhsz.supabase.co';
+const String _supabaseAnonKey =
+    'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InZmcGd6dWVoZmViaGF3bGlkaHN6Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzMwMjk4ODMsImV4cCI6MjA4ODYwNTg4M30.ZzaOTYxShnwwLDMNH1uZKb59lYsB6pnNk1mPik2VRR0';
 
-  await Supabase.initialize(
-    url:     'https://vfpgzuehfebhawlidhsz.supabase.co',
-    anonKey: 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InZmcGd6dWVoZmViaGF3bGlkaHN6Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzMwMjk4ODMsImV4cCI6MjA4ODYwNTg4M30.ZzaOTYxShnwwLDMNH1uZKb59lYsB6pnNk1mPik2VRR0',
-    authOptions: const FlutterAuthClientOptions(
-      authFlowType: AuthFlowType.implicit,
-    ),
-  );
+void main() {
+  // Global crash guard: any uncaught error is logged instead of killing the app.
+  runZonedGuarded(() {
+    WidgetsFlutterBinding.ensureInitialized();
 
-  // NOTE: Google Sign-In is initialized inside AuthService.signInWithGoogle()
-  // with the real client IDs. It must not be initialized a second time here.
+    FlutterError.onError = (details) {
+      FlutterError.presentError(details);
+      debugPrint('Flutter error: ${details.exception}');
+    };
 
-  runApp(const BloomApp());
+    runApp(const BloomApp());
+  }, (error, stack) {
+    debugPrint('Unhandled error: $error');
+  });
 }
 
 class BloomApp extends StatelessWidget {
@@ -64,7 +76,106 @@ class BloomApp extends StatelessWidget {
           child: child ?? const SizedBox.shrink(),
         );
       },
-      home: const AuthGate(),
+      home: const _Bootstrap(),
+    );
+  }
+}
+
+// ── Bootstrap: initialises Supabase safely, with offline retry ───────────────
+class _Bootstrap extends StatefulWidget {
+  const _Bootstrap();
+  @override
+  State<_Bootstrap> createState() => _BootstrapState();
+}
+
+class _BootstrapState extends State<_Bootstrap> {
+  bool _ready  = false;
+  bool _failed = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _init();
+  }
+
+  Future<void> _init() async {
+    if (mounted) setState(() => _failed = false);
+    try {
+      await Supabase.initialize(
+        url:     _supabaseUrl,
+        anonKey: _supabaseAnonKey,
+        authOptions: const FlutterAuthClientOptions(
+          authFlowType: AuthFlowType.implicit,
+        ),
+      );
+
+      // NOTE: Google Sign-In is initialized inside
+      // AuthService.signInWithGoogle() with the real client IDs.
+      // It must not be initialized a second time here.
+
+      if (mounted) setState(() => _ready = true);
+    } catch (e) {
+      debugPrint('Startup failed: $e');
+      if (mounted) setState(() => _failed = true);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (_ready)  return const AuthGate();
+    if (_failed) return _OfflineStartScreen(onRetry: _init);
+    return const _SplashScreen();
+  }
+}
+
+// ── Shown when the app can't start because there is no connection ────────────
+class _OfflineStartScreen extends StatelessWidget {
+  final VoidCallback onRetry;
+  const _OfflineStartScreen({required this.onRetry});
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: AppColors.background,
+      body: SafeArea(
+        child: Center(
+          child: Padding(
+            padding: const EdgeInsets.all(32),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const Icon(Icons.wifi_off_rounded,
+                    size: 56, color: Color(0xFFC62828)),
+                const SizedBox(height: 20),
+                Text(
+                  AppErrors.offlineMessage,
+                  textAlign: TextAlign.center,
+                  style: GoogleFonts.nunito(
+                    fontSize: 16,
+                    fontWeight: FontWeight.w800,
+                    color: AppColors.textDark,
+                  ),
+                ),
+                const SizedBox(height: 24),
+                ElevatedButton.icon(
+                  onPressed: onRetry,
+                  icon: const Icon(Icons.refresh_rounded),
+                  label: Text('Retry',
+                      style: GoogleFonts.nunito(fontWeight: FontWeight.w700)),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: AppColors.primary,
+                    foregroundColor: Colors.white,
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 28, vertical: 12),
+                    shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(10)),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
     );
   }
 }
@@ -155,7 +266,9 @@ class _AuthGateState extends State<AuthGate> {
             .eq('id', user.id)
             .maybeSingle();
         if (row != null && row['is_active'] == false) _handleDeactivated();
-      } catch (_) {}
+      } catch (_) {
+        // Offline or temporary failure: ignore, try again next tick.
+      }
     });
   }
 
@@ -177,11 +290,16 @@ class _AuthGateState extends State<AuthGate> {
   // ── Deep links ────────────────────────────────────────────────────────────
   void _initDeepLinks() {
     if (kIsWeb) return;
-    final appLinks = AppLinks();
-    appLinks.getInitialLink().then((uri) {
-      if (uri != null) _handleDeepLink(uri);
-    });
-    _linkSub = appLinks.uriLinkStream.listen(_handleDeepLink);
+    try {
+      final appLinks = AppLinks();
+      appLinks.getInitialLink().then((uri) {
+        if (uri != null) _handleDeepLink(uri);
+      }).catchError((_) {});
+      _linkSub = appLinks.uriLinkStream.listen(
+        _handleDeepLink,
+        onError: (_) {},
+      );
+    } catch (_) {}
   }
 
   void _handleDeepLink(Uri uri) {
@@ -208,13 +326,26 @@ class _AuthGateState extends State<AuthGate> {
 
   // Runs the checks, and if anything unexpected fails, returns to the
   // login screen instead of leaving the app stuck on the loading spinner.
+  // Network failures keep an existing session instead of signing out.
   Future<void> _safeResolve() async {
     try {
       await _resolveAuthenticatedStatus();
-    } catch (_) {
+    } catch (e) {
+      if (AppErrors.isNetworkError(e) &&
+          _supabase.auth.currentUser != null) {
+        _enterOffline(_supabase.auth.currentUser!.id);
+        return;
+      }
       try { await AuthService.signOut(); } catch (_) {}
       if (mounted) setState(() => _status = _AuthStatus.unauthenticated);
     }
+  }
+
+  /// Lets an already-signed-in user into the app while offline.
+  /// The role is left empty so HomeScreen fetches it once back online.
+  void _enterOffline(String userId) {
+    _startDeactivationWatcher(userId);
+    if (mounted) setState(() => _status = _AuthStatus.authenticated);
   }
 
   void _subscribeToAuthEvents() {
@@ -245,7 +376,9 @@ class _AuthGateState extends State<AuthGate> {
           return;
         }
       },
-      onError: (_) {
+      onError: (error) {
+        // A failed token refresh while offline must NOT log the user out.
+        if (AppErrors.isNetworkError(error)) return;
         if (mounted) setState(() => _status = _AuthStatus.unauthenticated);
       },
     );
@@ -328,11 +461,15 @@ class _AuthGateState extends State<AuthGate> {
       _startDeactivationWatcher(user.id);
       _resolvedRole = role.isNotEmpty ? role : 'student';
       if (mounted) setState(() => _status = _AuthStatus.authenticated);
-    } catch (_) {
+    } catch (e) {
       if (!mounted || myCheckId != _checkId) return;
+
       if (inMasterlist == true) {
         _startDeactivationWatcher(user.id);
         if (mounted) setState(() => _status = _AuthStatus.authenticated);
+      } else if (AppErrors.isNetworkError(e) || e is TimeoutException) {
+        // Offline with an existing session: keep the user signed in.
+        _enterOffline(user.id);
       } else {
         await AuthService.signOut();
         if (mounted) setState(() => _status = _AuthStatus.unauthenticated);

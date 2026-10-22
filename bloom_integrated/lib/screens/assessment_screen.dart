@@ -5,6 +5,7 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 import '../theme/app_theme.dart';
 import '../widgets/common_widgets.dart';
 import '../services/badge_service.dart';
+import '../utils/error_handler.dart';
 
 
 final _supabase = Supabase.instance.client;
@@ -33,6 +34,7 @@ class _AssessmentScreenState extends State<AssessmentScreen> {
   Map<String, dynamic>? _assessment;
   List<Map<String, dynamic>> _questions = [];
   bool _loading = true;
+  bool _loadFailed = false;
   bool _submitting = false;
   bool _done = false;
 
@@ -50,6 +52,7 @@ class _AssessmentScreenState extends State<AssessmentScreen> {
   // Timer
   Timer?  _timer;
   int     _secondsLeft = 0;
+  int     _timeLimitSeconds = 0;
   bool    _timerStarted = false;
 
 
@@ -58,6 +61,7 @@ class _AssessmentScreenState extends State<AssessmentScreen> {
   double _maxScore = 0;
   bool _passed = false;
   int? _previousAttempts;
+  DateTime _startedAt = DateTime.now();
 
 
   @override
@@ -76,7 +80,7 @@ class _AssessmentScreenState extends State<AssessmentScreen> {
 
 
   Future<void> _load() async {
-    setState(() => _loading = true);
+    setState(() { _loading = true; _loadFailed = false; });
     try {
       // Get assessment for this module
       final assessments = await _supabase
@@ -122,17 +126,20 @@ class _AssessmentScreenState extends State<AssessmentScreen> {
           _assessment = assessment;
           _questions = _deepCastQuestions(questions as List);
           _previousAttempts = prevAttempts;
+          _startedAt = DateTime.now();
           _loading = false;
         });
-        // FIX: the admin panel saves the limit as "time_limit_minutes"
+        // The admin panel saves the limit as "time_limit_minutes"
         final timeLimitMins =
             (assessment['time_limit_minutes'] ?? assessment['time_limit']) as int?;
         if (timeLimitMins != null && timeLimitMins > 0) {
-          _startTimer(timeLimitMins * 60);
+          _timeLimitSeconds = timeLimitMins * 60;
+          _startTimer(_timeLimitSeconds);
         }
       }
     } catch (e) {
-      if (mounted) setState(() => _loading = false);
+      debugPrint('❌ Load error: $e');
+      if (mounted) setState(() { _loading = false; _loadFailed = true; });
     }
   }
 
@@ -188,12 +195,35 @@ class _AssessmentScreenState extends State<AssessmentScreen> {
   }
 
 
+  /// Restarts the quiz for a retake. Everything is reset locally, so this
+  /// works instantly and doesn't need a network round-trip.
+  void _retake() {
+    for (final c in _textControllers.values) { c.dispose(); }
+    _textControllers.clear();
+    setState(() {
+      _done = false;
+      _currentQ = 0;
+      _answers.clear();
+      _score = 0;
+      _maxScore = 0;
+      _passed = false;
+      _startedAt = DateTime.now();
+    });
+    if (_timeLimitSeconds > 0) _startTimer(_timeLimitSeconds);
+  }
+
+
   Future<void> _submitAssessment() async {
+    // Guard against double submit (e.g. timer expiry + button tap)
+    if (_submitting || _done) return;
+
     _timer?.cancel();
     setState(() => _submitting = true);
+
+    String? attemptId;
     try {
       final userId = _supabase.auth.currentUser?.id;
-      if (userId == null) return;
+      if (userId == null) throw Exception('Not signed in');
 
 
       // Calculate score
@@ -228,7 +258,7 @@ class _AssessmentScreenState extends State<AssessmentScreen> {
 
       final passingScore = (_assessment?['passing_score'] as num?)?.toDouble() ?? 75.0;
       final passed = maxScore > 0 ? (score / maxScore * 100) >= passingScore : false;
-      // FIX: save the score as a PERCENTAGE (e.g. 80), not the raw points (e.g. 4)
+      // Save the score as a PERCENTAGE (e.g. 80), not the raw points (e.g. 4)
       final scorePercent = maxScore > 0 ? (score / maxScore * 100).round() : 0;
 
 
@@ -240,13 +270,15 @@ class _AssessmentScreenState extends State<AssessmentScreen> {
         'score': scorePercent,
         'max_score': maxScore,
         'passed': passed,
-        'started_at': DateTime.now().toIso8601String(),
-        'submitted_at': DateTime.now().toIso8601String(),
+        'started_at': _startedAt.toUtc().toIso8601String(),
+        'submitted_at': DateTime.now().toUtc().toIso8601String(),
         'status': 'submitted',
       }).select().single();
+      attemptId = attempt['id']?.toString();
 
 
-      // Save individual answers
+      // Save individual answers in ONE insert (all rows share the same keys)
+      final rows = <Map<String, dynamic>>[];
       for (final q in _questions) {
         final qId = q['id'].toString();
         final answer = _answers[qId];
@@ -258,10 +290,11 @@ class _AssessmentScreenState extends State<AssessmentScreen> {
 
 
         if (isShortAnswer) {
-          // Save short answer text — manually graded by admin
-          await _supabase.from('assessment_answers').insert({
+          // Manually graded by admin
+          rows.add({
             'attempt_id': attempt['id'],
             'question_id': q['id'],
+            'selected_option_id': null,
             'text_answer': answer,
             'is_correct': null, // pending manual grading
             'points_earned': 0,
@@ -276,14 +309,18 @@ class _AssessmentScreenState extends State<AssessmentScreen> {
           final pts = (q['points'] as num?)?.toDouble() ?? 1.0;
 
 
-          await _supabase.from('assessment_answers').insert({
+          rows.add({
             'attempt_id': attempt['id'],
             'question_id': q['id'],
             'selected_option_id': answer,
+            'text_answer': null,
             'is_correct': isCorrect,
             'points_earned': isCorrect ? pts : 0,
           });
         }
+      }
+      if (rows.isNotEmpty) {
+        await _supabase.from('assessment_answers').insert(rows);
       }
 
 
@@ -294,7 +331,7 @@ class _AssessmentScreenState extends State<AssessmentScreen> {
           'module_id': widget.moduleId,
           'progress_percent': 100,
           'status': 'completed',
-          'last_accessed_at': DateTime.now().toIso8601String(),
+          'last_accessed_at': DateTime.now().toUtc().toIso8601String(),
         }, onConflict: 'user_id,module_id');
 
 
@@ -308,12 +345,27 @@ class _AssessmentScreenState extends State<AssessmentScreen> {
           _score = score;
           _maxScore = maxScore;
           _passed = passed;
+          _previousAttempts = (_previousAttempts ?? 0) + 1;
           _done = true;
-          _submitting = false;
         });
       }
     } catch (e) {
       debugPrint('❌ Submit error: $e');
+
+      // Best effort: remove a half-saved attempt so the student can resubmit
+      // cleanly with the same attempt number.
+      if (attemptId != null) {
+        try {
+          await _supabase.from('assessment_attempts').delete().eq('id', attemptId);
+        } catch (_) {}
+      }
+
+      if (mounted) {
+        AppErrors.show(context, e);
+        // Give the student their remaining time back so they can try again.
+        if (_secondsLeft > 0 && _timeLimitSeconds > 0) _startTimer(_secondsLeft);
+      }
+    } finally {
       if (mounted) setState(() => _submitting = false);
     }
   }
@@ -321,13 +373,17 @@ class _AssessmentScreenState extends State<AssessmentScreen> {
 
   Future<void> _checkAndAwardBadges(String userId) async {
     // Shared logic lives in BadgeService so Library/Achievements use the same rules.
-    final unlocked = await BadgeService.checkAndAward();
-    if (unlocked.isNotEmpty && mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-        content: Text('🏅 Badge unlocked: ${unlocked.join(', ')}'),
-        backgroundColor: AppColors.primary,
-        behavior: SnackBarBehavior.floating,
-      ));
+    try {
+      final unlocked = await BadgeService.checkAndAward();
+      if (unlocked.isNotEmpty && mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text('🏅 Badge unlocked: ${unlocked.join(', ')}'),
+          backgroundColor: AppColors.primary,
+          behavior: SnackBarBehavior.floating,
+        ));
+      }
+    } catch (_) {
+      // Badge failure must never block a successful submission.
     }
   }
 
@@ -353,15 +409,34 @@ class _AssessmentScreenState extends State<AssessmentScreen> {
                 child: Column(
                   mainAxisAlignment: MainAxisAlignment.center,
                   children: [
-                    const Icon(Icons.quiz_outlined, size: 48, color: AppColors.textLight),
+                    Icon(
+                      _loadFailed ? Icons.wifi_off_rounded : Icons.quiz_outlined,
+                      size: 48,
+                      color: _loadFailed ? const Color(0xFFC62828) : AppColors.textLight,
+                    ),
                     const SizedBox(height: 12),
-                    Text('No assessment available yet',
+                    Text(
+                        _loadFailed
+                            ? AppErrors.offlineMessage
+                            : 'No assessment available yet',
+                        textAlign: TextAlign.center,
                         style: GoogleFonts.nunito(
                             color: AppColors.textLight, fontWeight: FontWeight.w700)),
                     const SizedBox(height: 6),
-                    Text('Check back later!',
-                        style: GoogleFonts.nunito(color: AppColors.textLight, fontSize: 12)),
+                    if (!_loadFailed)
+                      Text('Check back later!',
+                          style: GoogleFonts.nunito(color: AppColors.textLight, fontSize: 12)),
                     const SizedBox(height: 24),
+                    if (_loadFailed) ...[
+                      ElevatedButton.icon(
+                        onPressed: _load,
+                        icon: const Icon(Icons.refresh_rounded, color: Colors.white),
+                        style: ElevatedButton.styleFrom(backgroundColor: AppColors.primary),
+                        label: Text('Retry',
+                            style: GoogleFonts.nunito(color: Colors.white, fontWeight: FontWeight.w700)),
+                      ),
+                      const SizedBox(height: 8),
+                    ],
                     ElevatedButton(
                       onPressed: widget.onComplete,
                       style: ElevatedButton.styleFrom(backgroundColor: AppColors.primary),
@@ -894,14 +969,7 @@ class _AssessmentScreenState extends State<AssessmentScreen> {
                     SizedBox(
                       width: double.infinity,
                       child: OutlinedButton(
-                        onPressed: () {
-                          setState(() {
-                            _done = false;
-                            _currentQ = 0;
-                            _answers.clear();
-                          });
-                          _load();
-                        },
+                        onPressed: _retake,
                         style: OutlinedButton.styleFrom(
                           side: const BorderSide(color: AppColors.primary, width: 1.5),
                           shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),

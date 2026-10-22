@@ -93,7 +93,13 @@ class SeminarModel {
 class EventModel {
   final String id;
   final String title;
+
+  /// Short form kept for existing screens, e.g. "10-25".
   final String date;
+
+  /// Readable form for display, e.g. "Oct 25, 2026". Empty if unparseable.
+  final String dateLabel;
+
   final String category;
   final int colorValue;
 
@@ -101,17 +107,31 @@ class EventModel {
     required this.id,
     required this.title,
     required this.date,
+    this.dateLabel = '',
     required this.category,
     required this.colorValue,
   });
 
   factory EventModel.fromMap(Map<String, dynamic> map) {
-    final raw = map['start_date'] ?? map['start_time'] ?? map['date'] ?? '';
-    final dateStr = raw.toString().length >= 10 ? raw.toString().substring(5, 10) : '';
+    final raw = (map['start_date'] ?? map['start_time'] ?? map['date'] ?? '').toString();
+    final dateStr = raw.length >= 10 ? raw.substring(5, 10) : '';
+
+    String label = '';
+    final parsed = DateTime.tryParse(raw);
+    if (parsed != null) {
+      const months = [
+        'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+        'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec',
+      ];
+      final d = parsed.toLocal();
+      label = '${months[d.month - 1]} ${d.day}, ${d.year}';
+    }
+
     return EventModel(
       id:         map['id']?.toString() ?? '',
       title:      map['title'] ?? 'Untitled Event',
       date:       dateStr,
+      dateLabel:  label,
       category:   map['category'] ?? 'Event',
       colorValue: 0xFFF4A261,
     );
