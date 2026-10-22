@@ -82,6 +82,12 @@ String _timeAgo(String? iso) {
   return '${dt.day}/${dt.month}/${dt.year}';
 }
 
+String _announcementText(Map<String, dynamic> a) {
+  final body = (a['body'] as String?)?.trim() ?? '';
+  if (body.isNotEmpty) return body;
+  return (a['content'] as String?)?.trim() ?? '';
+}
+
 // ─────────────────────────────────────────────────────────────────
 //  NAV RESULT — returned to MainShell via Navigator.pop()
 //
@@ -105,6 +111,7 @@ class NotificationsScreen extends StatefulWidget {
 class _NotificationsScreenState extends State<NotificationsScreen>
     with SingleTickerProviderStateMixin {
   bool _showUnread = false;
+  List<Map<String, dynamic>> _pinned = [];
 
   late final AnimationController _fadeCtrl;
   late final Animation<double> _fadeAnim;
@@ -116,12 +123,40 @@ class _NotificationsScreenState extends State<NotificationsScreen>
         vsync: this, duration: const Duration(milliseconds: 280));
     _fadeAnim = CurvedAnimation(parent: _fadeCtrl, curve: Curves.easeIn);
     _fadeCtrl.forward();
+    _loadPinned();
   }
 
   @override
   void dispose() {
     _fadeCtrl.dispose();
     super.dispose();
+  }
+
+  // ── Pinned announcements ───────────────────────────────────────
+  // RLS already limits students to published, non-expired announcements
+  // meant for them, so only the pinned filter is needed here.
+  Future<void> _loadPinned() async {
+    try {
+      final rows = await Supabase.instance.client
+          .from('announcements')
+          .select('id, title, body, content, published_at, created_at')
+          .eq('is_pinned', true)
+          .order('published_at', ascending: false);
+      if (!mounted) return;
+      setState(() => _pinned = List<Map<String, dynamic>>.from(rows));
+    } catch (_) {
+      // Keep whatever we had; the notification list still works.
+    }
+  }
+
+  void _openPinned(Map<String, dynamic> a) {
+    _showDetail({
+      'type': 'announcement',
+      'reference_id': a['id'],
+      'title': a['title'],
+      'body': _announcementText(a),
+      'created_at': a['published_at'] ?? a['created_at'],
+    });
   }
 
   // ── Tap: mark read + navigate ──────────────────────────────────
@@ -329,21 +364,26 @@ class _NotificationsScreenState extends State<NotificationsScreen>
           child: CircularProgressIndicator(color: AppColors.primary));
     }
 
+    final showPinned = !_showUnread && _pinned.isNotEmpty;
+    final offset     = showPinned ? 1 : 0;
+
     return RefreshIndicator(
       color: AppColors.primary,
-      onRefresh: () async {
-        await Future.delayed(const Duration(milliseconds: 400));
-      },
-      child: displayed.isEmpty
+      onRefresh: _loadPinned,
+      child: (displayed.isEmpty && !showPinned)
           ? _EmptyState(showUnread: _showUnread)
           : FadeTransition(
               opacity: _fadeAnim,
               child: ListView.separated(
+                physics: const AlwaysScrollableScrollPhysics(),
                 padding: const EdgeInsets.all(12),
-                itemCount: displayed.length,
+                itemCount: displayed.length + offset,
                 separatorBuilder: (_, __) => const SizedBox(height: 8),
                 itemBuilder: (context, i) {
-                  final n = displayed[i];
+                  if (showPinned && i == 0) {
+                    return _PinnedSection(items: _pinned, onTap: _openPinned);
+                  }
+                  final n = displayed[i - offset];
                   return Dismissible(
                     key: Key(n['id'].toString()),
                     direction: DismissDirection.endToStart,
@@ -358,6 +398,118 @@ class _NotificationsScreenState extends State<NotificationsScreen>
                 },
               ),
             ),
+    );
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────
+//  PINNED ANNOUNCEMENTS
+// ─────────────────────────────────────────────────────────────────
+class _PinnedSection extends StatelessWidget {
+  final List<Map<String, dynamic>> items;
+  final void Function(Map<String, dynamic>) onTap;
+
+  const _PinnedSection({required this.items, required this.onTap});
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Padding(
+          padding: const EdgeInsets.fromLTRB(2, 0, 0, 8),
+          child: Row(children: [
+            Icon(Icons.push_pin_outlined, size: 16, color: AppColors.primary),
+            const SizedBox(width: 6),
+            Text('Pinned',
+                style: GoogleFonts.nunito(
+                    fontSize: 13,
+                    fontWeight: FontWeight.w900,
+                    color: AppColors.primary)),
+          ]),
+        ),
+        for (final a in items)
+          Padding(
+            padding: const EdgeInsets.only(bottom: 8),
+            child: _PinnedCard(announcement: a, onTap: () => onTap(a)),
+          ),
+        const SizedBox(height: 4),
+      ],
+    );
+  }
+}
+
+class _PinnedCard extends StatelessWidget {
+  final Map<String, dynamic> announcement;
+  final VoidCallback onTap;
+
+  const _PinnedCard({required this.announcement, required this.onTap});
+
+  @override
+  Widget build(BuildContext context) {
+    final a    = announcement;
+    final body = _announcementText(a);
+
+    return GestureDetector(
+      onTap: onTap,
+      child: Container(
+        padding: const EdgeInsets.all(14),
+        decoration: BoxDecoration(
+          color: AppColors.primary.withValues(alpha: 0.06),
+          borderRadius: BorderRadius.circular(14),
+          border: Border.all(
+              color: AppColors.primary.withValues(alpha: 0.35), width: 1.5),
+        ),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Container(
+              width: 42,
+              height: 42,
+              decoration: BoxDecoration(
+                color: AppColors.primary.withValues(alpha: 0.15),
+                borderRadius: BorderRadius.circular(12),
+              ),
+              child: Icon(Icons.push_pin, color: AppColors.primary, size: 20),
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    a['title'] as String? ?? '',
+                    style: GoogleFonts.nunito(
+                        fontWeight: FontWeight.w800,
+                        fontSize: 14,
+                        color: AppColors.textDark),
+                  ),
+                  if (body.isNotEmpty) ...[
+                    const SizedBox(height: 3),
+                    Text(
+                      body,
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                      style: GoogleFonts.nunito(
+                          fontSize: 12,
+                          color: AppColors.textLight,
+                          height: 1.4),
+                    ),
+                  ],
+                  const SizedBox(height: 6),
+                  Text(
+                    _timeAgo((a['published_at'] ?? a['created_at']) as String?),
+                    style: GoogleFonts.nunito(
+                        fontSize: 11, color: AppColors.textLight),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(width: 6),
+            Icon(Icons.chevron_right, size: 18, color: AppColors.textLight),
+          ],
+        ),
+      ),
     );
   }
 }
